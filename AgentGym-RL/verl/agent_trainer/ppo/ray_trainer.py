@@ -28,10 +28,16 @@ import numpy as np
 from codetiming import Timer
 from omegaconf import OmegaConf, open_dict
 from verl import DataProto
+from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import RayResourcePool, RayWorkerGroup, RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.agent_trainer.ppo import core_algos
+from verl.agent_trainer.ppo.wmc_erc import apply_wmc_erc
+from verl.agent_trainer.ppo.world_model_loss import (
+    DEFAULT_WORLD_MODEL_PROMPT,
+    build_world_model_sft_batch,
+)
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.agent_dataset.rl_dataset import RLHFDataset, collate_fn
@@ -403,6 +409,8 @@ class RayPPOTrainer(object):
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
+        self.wmc_erc_config = OmegaConf.select(config, 'wmc_erc', default=None)
+        self.wmc_erc_running_stats = {}
 
         # define KL control
         if self.use_reference_policy:
@@ -631,7 +639,8 @@ class RayPPOTrainer(object):
         self.actor_rollout_wg.save_checkpoint(actor_local_path,
                                               actor_remote_path,
                                               self.global_steps,
-                                              remove_previous_ckpt=self.config.trainer.remove_previous_ckpt_in_save)
+                                              remove_previous_ckpt=self.config.trainer.remove_previous_ckpt_in_save,
+                                              max_ckpt_to_keep=self.config.trainer.max_local_ckpt_to_keep)
 
         if self.use_critic:
             critic_local_path = os.path.join(local_global_step_folder, 'critic')
@@ -640,7 +649,8 @@ class RayPPOTrainer(object):
             self.critic_wg.save_checkpoint(critic_local_path,
                                            critic_remote_path,
                                            self.global_steps,
-                                           remove_previous_ckpt=self.config.trainer.remove_previous_ckpt_in_save)
+                                           remove_previous_ckpt=self.config.trainer.remove_previous_ckpt_in_save,
+                                           max_ckpt_to_keep=self.config.trainer.max_local_ckpt_to_keep)
 
         # save dataloader
         dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
@@ -714,6 +724,36 @@ class RayPPOTrainer(object):
         self.train_dataloader = torch.load(dataloader_local_path)
         if isinstance(self.train_dataloader.dataset, RLHFDataset):
             self.train_dataloader.dataset.resume_dataset_state()
+
+    def _build_world_model_sft_dataproto(self, batch: DataProto):
+        """Build a DataProto of env-prediction SFT samples from rollout messages.
+
+        Returns ``None`` when the world-model auxiliary pass is disabled, the
+        rollout did not expose ``rollout_messages``, or no env turn qualifies
+        as an SFT target.
+        """
+        wm_cfg = self.config.actor_rollout_ref.actor.get('world_model', None)
+        if wm_cfg is None:
+            return None
+        coef = float(self.config.actor_rollout_ref.actor.get('world_model_coeff', 0.0))
+        if coef <= 0 and not wm_cfg.get('enable', False):
+            return None
+
+        messages_list = batch.non_tensor_batch.get('rollout_messages', None)
+        if messages_list is None:
+            return None
+
+        assembled = build_world_model_sft_batch(
+            messages_list=list(messages_list),
+            tokenizer=self.tokenizer,
+            env_predict_prompt=wm_cfg.get('env_predict_prompt', None) or DEFAULT_WORLD_MODEL_PROMPT,
+            max_length=int(wm_cfg.get('max_length', 4096)),
+            max_samples_per_trajectory=wm_cfg.get('max_samples_per_trajectory', None),
+            min_env_tokens=int(wm_cfg.get('min_env_tokens', 1)),
+        )
+        if assembled is None:
+            return None
+        return DataProto.from_single_dict(assembled)
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix='global_seqlen'):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -809,8 +849,10 @@ class RayPPOTrainer(object):
 
                     # recompute old_log_probs
                     with _timer('old_log_prob', timing_raw):
+                        batch.meta_info['return_entropy'] = bool(self.wmc_erc_config and self.wmc_erc_config.get('enable', False))
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         batch = batch.union(old_log_prob)
+                        batch.meta_info['return_entropy'] = False
 
                     if self.use_reference_policy:
                         # compute reference log_prob
@@ -845,6 +887,15 @@ class RayPPOTrainer(object):
                                                   lam=self.config.algorithm.lam,
                                                   num_repeat=self.config.actor_rollout_ref.rollout.n)
 
+                        if self.wmc_erc_config and self.wmc_erc_config.get('enable', False) and 'entropys' in batch.batch.keys():
+                            batch, wmc_metrics = apply_wmc_erc(batch=batch,
+                                                               entropys=batch.batch['entropys'],
+                                                               wmc_erc_config=self.wmc_erc_config,
+                                                               running_stats=self.wmc_erc_running_stats)
+                            metrics.update(wmc_metrics)
+                        if 'entropys' in batch.batch.keys():
+                            batch.batch.pop('entropys')
+
                     # update critic
                     if self.use_critic:
                         with _timer('update_critic', timing_raw):
@@ -859,6 +910,22 @@ class RayPPOTrainer(object):
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                         metrics.update(actor_output_metrics)
+
+                        # Optional world-model SFT update on env-prediction data
+                        # re-assembled with chat template from the rollout.
+                        if float(self.config.actor_rollout_ref.actor.get('world_model_coeff', 0.0)) > 0:
+                            wm_data = self._build_world_model_sft_dataproto(batch)
+                            if wm_data is not None and len(wm_data) > 0:
+                                # DP dispatch requires divisibility by world_size.
+                                wm_data_padded, _wm_pad = pad_dataproto_to_divisor(
+                                    wm_data, self.actor_rollout_wg.world_size)
+                                with _timer('update_world_model', timing_raw):
+                                    wm_output = self.actor_rollout_wg.update_actor_world_model(wm_data_padded)
+                                wm_metrics = reduce_metrics(wm_output.meta_info['metrics'])
+                                metrics.update(wm_metrics)
+                                metrics['actor/world_model_num_samples'] = len(wm_data)
+                            else:
+                                metrics['actor/world_model_num_samples'] = 0
 
                     if self.config.trainer.save_freq > 0 and \
                             self.global_steps % self.config.trainer.save_freq == 0:

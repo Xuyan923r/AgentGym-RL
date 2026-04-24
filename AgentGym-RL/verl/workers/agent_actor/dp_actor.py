@@ -24,6 +24,10 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
 from verl.agent_trainer.ppo import core_algos
+from verl.agent_trainer.ppo.world_model_loss import (
+    compute_world_model_loss,
+    compute_world_model_sft_loss_from_logits,
+)
 from verl.workers.agent_actor import BasePPOActor
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import logprobs_from_logits, masked_mean
@@ -150,7 +154,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer.step()
         return grad_norm
 
-    def compute_log_prob(self, data: DataProto) -> torch.Tensor:
+    def compute_log_prob(self, data: DataProto):
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
         Args:
@@ -166,7 +170,8 @@ class DataParallelPPOActor(BasePPOActor):
                 ``responses``:  tensor of shape [batch_size, response_length]. torch.int64.
 
         Returns:
-            torch.Tensor: the log_prob tensor
+            torch.Tensor or Tuple[torch.Tensor, torch.Tensor]: log_prob tensor and,
+            optionally, entropy tensor over response tokens.
         """
         # set to eval
         self.actor_module.eval()
@@ -174,6 +179,7 @@ class DataParallelPPOActor(BasePPOActor):
         micro_batch_size = data.meta_info['micro_batch_size']
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
         use_dynamic_bsz = data.meta_info['use_dynamic_bsz']
+        return_entropy = data.meta_info.get('return_entropy', False)
 
         select_keys = ['responses', 'input_ids', 'attention_mask', 'position_ids']
         batch = data.select(batch_keys=select_keys).batch
@@ -186,18 +192,26 @@ class DataParallelPPOActor(BasePPOActor):
             micro_batches = batch.split(micro_batch_size)
 
         log_probs_lst = []
+        entropy_lst = []
         for micro_batch in micro_batches:
             with torch.no_grad():
-                _, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature)
+                entropy, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature)
             log_probs_lst.append(log_probs)
+            if return_entropy:
+                entropy_lst.append(entropy)
         log_probs = torch.concat(log_probs_lst, dim=0)
+        entropys = torch.concat(entropy_lst, dim=0) if return_entropy else None
 
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
             assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
+            if return_entropy:
+                entropys = entropys[revert_indices]
 
+        if return_entropy:
+            return log_probs, entropys
         return log_probs
 
     def update_policy(self, data: DataProto):
@@ -205,10 +219,13 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module.train()
 
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
+        world_model_coeff = self.config.get('world_model_coeff', 0.0)
 
         select_keys = ['input_ids', 'attention_mask', 'position_ids', 'old_log_probs', 'advantages', 'responses', 'response_mask']
         if self.config.use_kl_loss:
             select_keys.append('ref_log_prob')
+        if world_model_coeff > 0 and 'observation_mask' in data.batch.keys():
+            select_keys.append('observation_mask')
         batch = data.select(batch_keys=select_keys).batch
 
         # Split to make minibatch iterator for updating the actor
@@ -264,6 +281,25 @@ class DataParallelPPOActor(BasePPOActor):
                     metrics['actor/kl_loss'] = kl_loss.detach().item()
                     metrics['actor/kl_coef'] = self.config.kl_loss_coef
 
+                # Legacy in-place world-model SFT term: only fires when the
+                # batch carries an explicit ``observation_mask`` (e.g. tests or
+                # callers that still mask env tokens on the rollout sequence).
+                # The recommended path is the separate ``update_world_model``
+                # pass driven by ``ray_trainer.fit`` on a freshly re-assembled
+                # chat-template batch.
+                if world_model_coeff > 0 and 'observation_mask' in data.keys():
+                    explicit_observation_mask = data['observation_mask']
+                    wm_sft_loss, _ = compute_world_model_loss(
+                        log_prob=log_prob,
+                        attention_mask=data['attention_mask'],
+                        response_mask=response_mask,
+                        observation_mask=explicit_observation_mask,
+                    )
+                    if wm_sft_loss is not None:
+                        policy_loss = policy_loss + world_model_coeff * wm_sft_loss
+                        metrics['actor/wm_sft_loss'] = wm_sft_loss.detach().item()
+                        metrics['actor/world_model_coeff'] = world_model_coeff
+
                 if self.config.use_dynamic_bsz:
                     # relative to the dynamic bsz
                     loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
@@ -282,5 +318,66 @@ class DataParallelPPOActor(BasePPOActor):
             grad_norm = self._optimizer_step()
             data = {'actor/grad_norm': grad_norm.detach().item()}
             append_to_dict(metrics, data)
+        self.actor_optimizer.zero_grad()
+        return metrics
+
+    def update_world_model(self, data: DataProto):
+        """SFT update on a freshly assembled world-model batch.
+
+        Expects ``data.batch`` with keys ``input_ids``, ``attention_mask``,
+        ``position_ids`` and ``loss_mask`` (1 on env-observation tokens the
+        model should learn to predict).  The resulting CE loss is scaled by
+        ``self.config.world_model_coeff`` before ``.backward()``.
+        """
+        self.actor_module.train()
+
+        coef = float(self.config.get('world_model_coeff', 0.0))
+        select_keys = ['input_ids', 'attention_mask', 'position_ids', 'loss_mask']
+        batch = data.select(batch_keys=select_keys).batch
+
+        mini_batch_size = self.config.get('world_model_mini_batch_size',
+                                          self.config.ppo_mini_batch_size)
+        micro_batch_size = self.config.get('world_model_micro_batch_size_per_gpu',
+                                           self.config.ppo_micro_batch_size_per_gpu)
+
+        metrics: dict = {}
+        dataloader = batch.split(mini_batch_size) if mini_batch_size else [batch]
+
+        for mini_batch in dataloader:
+            micro_batches = mini_batch.split(micro_batch_size) if micro_batch_size else [mini_batch]
+            gradient_accumulation = max(1, len(micro_batches))
+
+            self.actor_optimizer.zero_grad()
+            for micro in micro_batches:
+                micro = micro.cuda()
+                loss_mask = micro['loss_mask']
+                if loss_mask.sum().item() == 0:
+                    continue
+
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    output = self.actor_module(
+                        input_ids=micro['input_ids'],
+                        attention_mask=micro['attention_mask'],
+                        position_ids=micro['position_ids'],
+                        use_cache=False,
+                    )
+                    wm_loss = compute_world_model_sft_loss_from_logits(
+                        logits=output.logits,
+                        labels=micro['input_ids'],
+                        loss_mask=loss_mask,
+                    )
+
+                loss = coef * wm_loss / gradient_accumulation
+                loss.backward()
+
+                append_to_dict(metrics, {
+                    'actor/world_model_sft_loss': wm_loss.detach().item(),
+                    'actor/world_model_coef': coef,
+                    'actor/world_model_valid_tokens': loss_mask.sum().detach().item(),
+                })
+
+            grad_norm = self._optimizer_step()
+            append_to_dict(metrics, {'actor/world_model_grad_norm': grad_norm.detach().item()})
+
         self.actor_optimizer.zero_grad()
         return metrics
