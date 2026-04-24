@@ -52,6 +52,8 @@ rollout:
     n: 1 # > 1 for grpo
     send_interval: 1
     rollout_log_dir: null
+    reward_mode: score # score | orm_binary
+    orm_success_score: 100.0 # only used when reward_mode=orm_binary
 
 actor:
   strategy: fsdp  # This is for backward-compatibility

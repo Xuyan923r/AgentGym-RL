@@ -98,6 +98,8 @@ actor_rollout_ref:
     n: 1 # > 1 for grpo
     send_interval: 1 # # interval when sending request
     rollout_log_dir: null # Directory for storing rollout trajectories.
+    reward_mode: score # score | orm_binary
+    orm_success_score: 100.0 # only used when reward_mode=orm_binary
 
 critic:
   rollout_n: ${actor_rollout_ref.rollout.n}

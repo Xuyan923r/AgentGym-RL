@@ -7,10 +7,10 @@ TRAIN_CODE_DIR="${ROOT}/AgentGym-RL"
 CONDA_SH="${CONDA_SH:-/home/yexuyan/miniconda3/etc/profile.d/conda.sh}"
 TRAIN_ENV="${TRAIN_ENV:-/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop}"
 MODEL_PATH="${MODEL_PATH:-${ROOT}/models/Qwen2.5-3B-Instruct}"
-TASK_NAME="webshop"
+TASK_NAME="sciworld"
 
-ENV_ADDR="${ENV_ADDR:-http://127.0.0.1:8013}"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,6,7}"
+ENV_ADDR="${ENV_ADDR:-http://127.0.0.1:36005}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 IFS=',' read -r -a GPU_ARRAY <<< "${CUDA_VISIBLE_DEVICES}"
 NUM_GPUS="${#GPU_ARRAY[@]}"
 if (( NUM_GPUS < 1 )); then
@@ -20,45 +20,34 @@ fi
 
 WANDB_MODE="${WANDB_MODE:-offline}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
-WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.wandb.ai}"
-PROJECT_NAME="${PROJECT_NAME:-agentgym-webshop}"
-REWARD_MODE="${REWARD_MODE:-score}"
-ORM_SUCCESS_SCORE="${ORM_SUCCESS_SCORE:-100.0}"
+PROJECT_NAME="${PROJECT_NAME:-agentgym-sciworld}"
 
 KL_COEF="${KL_COEF:-0.001}"
 POLICY_LR="${POLICY_LR:-1e-6}"
+CRITIC_LR="${CRITIC_LR:-1e-5}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-8}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 PPO_EPOCHS="${PPO_EPOCHS:-2}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-2}"
-MAX_ROUNDS="${MAX_ROUNDS:-15}"
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-768}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-8192}"
+MAX_ROUNDS="${MAX_ROUNDS:-20}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
-MAX_TOKENS_PER_TURN="${MAX_TOKENS_PER_TURN:-256}"
-ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.60}"
-SAVE_FREQ="${SAVE_FREQ:-200}"
+MAX_TOKENS_PER_TURN="${MAX_TOKENS_PER_TURN:-200}"
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.70}"
+REWARD_MODE="${REWARD_MODE:-score}"
+ORM_SUCCESS_SCORE="${ORM_SUCCESS_SCORE:-100.0}"
+SAVE_FREQ="${SAVE_FREQ:-50}"
 REMOVE_PREVIOUS_CKPT_IN_SAVE="${REMOVE_PREVIOUS_CKPT_IN_SAVE:-0}"
-MAX_LOCAL_CKPT_TO_KEEP="${MAX_LOCAL_CKPT_TO_KEEP:-10}"
+MAX_LOCAL_CKPT_TO_KEEP="${MAX_LOCAL_CKPT_TO_KEEP:-6}"
 
-ENABLE_WMC="${ENABLE_WMC:-0}"
-WMC_COEFF="${WMC_COEFF:-0.001}"
-ENABLE_ERC="${ENABLE_ERC:-0}"
-ERC_MU_BASE="${ERC_MU_BASE:-1.0}"
-ERC_MU_EXP="${ERC_MU_EXP:-2.0}"
-ERC_ETA_WM="${ERC_ETA_WM:-3.0}"
-ERC_LAMBDA_WM="${ERC_LAMBDA_WM:-1.0}"
-ERC_CLIPPING_TYPE="${ERC_CLIPPING_TYPE:-global}"
-ERC_CLIPPING_METHOD="${ERC_CLIPPING_METHOD:-mask}"
-ERC_MOMENTUM="${ERC_MOMENTUM:-0.9}"
-
-EXP_NAME="${EXP_NAME:-webshop_grpo_$(basename "${MODEL_PATH}")_$(date -u +%Y%m%d_%H%M%S)}"
+EXP_NAME="${EXP_NAME:-sciworld_ppo_$(basename "${MODEL_PATH}")_$(date -u +%Y%m%d_%H%M%S)}"
 CKPT_DIR="${CKPT_DIR:-${ROOT}/checkpoints/${EXP_NAME}}"
 RUN_DIR="${RUN_DIR:-${ROOT}/runlogs/${EXP_NAME}}"
 ROLLOUT_LOG_DIR="${ROLLOUT_LOG_DIR:-${RUN_DIR}/rollout_logs}"
-TRAIN_FILE="${TRAIN_FILE:-${ROOT}/AgentItemId/train/webshop_train.json}"
+TRAIN_FILE="${TRAIN_FILE:-${ROOT}/AgentItemId/sciworld_train.json}"
 LOG_PATH="${LOG_PATH:-}"
 
 mkdir -p "${CKPT_DIR}" "${RUN_DIR}" "${ROLLOUT_LOG_DIR}"
@@ -74,38 +63,20 @@ if (( REAL_TRAIN_BATCH_SIZE % NUM_GPUS != 0 )); then
   exit 1
 fi
 
-source "${CONDA_SH}"
-set +u
-conda activate "${TRAIN_ENV}"
-set -u
-
-# Some conda env activation scripts override HF cache to /tmp.
-# Force caches back to /idfsdata to avoid writing to /tmp or /home.
-if [[ -z "${HF_HOME:-}" || "${HF_HOME}" == /tmp/* || "${HF_HOME}" == /home/* ]]; then
-  HF_HOME="/idfsdata/yexuyan/hw"
-fi
-if [[ -z "${TRANSFORMERS_CACHE:-}" || "${TRANSFORMERS_CACHE}" == /tmp/* || "${TRANSFORMERS_CACHE}" == /home/* ]]; then
-  TRANSFORMERS_CACHE="${HF_HOME}/hub"
-fi
-mkdir -p "${HF_HOME}" "${TRANSFORMERS_CACHE}"
-export HF_HOME TRANSFORMERS_CACHE
-
-python "${ROOT}/scripts/prepare_webshop_grpo_splits.py"
-
-WMC_COEFF_VALUE="0.0"
-if [[ "${ENABLE_WMC}" == "1" ]]; then
-  WMC_COEFF_VALUE="${WMC_COEFF}"
-fi
-
-ERC_ENABLE_VALUE="False"
-if [[ "${ENABLE_ERC}" == "1" ]]; then
-  ERC_ENABLE_VALUE="True"
+if [[ ! -f "${TRAIN_FILE}" ]]; then
+  echo "SciWorld train file not found: ${TRAIN_FILE}"
+  exit 1
 fi
 
 REMOVE_PREVIOUS_CKPT_IN_SAVE_VALUE="False"
 if [[ "${REMOVE_PREVIOUS_CKPT_IN_SAVE}" == "1" ]]; then
   REMOVE_PREVIOUS_CKPT_IN_SAVE_VALUE="True"
 fi
+
+source "${CONDA_SH}"
+set +u
+conda activate "${TRAIN_ENV}"
+set -u
 
 export NO_PROXY="${NO_PROXY:-127.0.0.1,localhost}"
 export no_proxy="${no_proxy:-127.0.0.1,localhost}"
@@ -117,8 +88,6 @@ exec env \
   NO_PROXY="${NO_PROXY}" \
   no_proxy="${no_proxy}" \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
-  HF_HOME="${HF_HOME}" \
-  TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE}" \
   VLLM_USE_MODELSCOPE=0 \
   VLLM_WORKER_MULTIPROC_METHOD=spawn \
   VLLM_ATTENTION_BACKEND=FLASH_ATTN \
@@ -126,9 +95,8 @@ exec env \
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   WANDB_MODE="${WANDB_MODE}" \
   WANDB_ENTITY="${WANDB_ENTITY}" \
-  WANDB_BASE_URL="${WANDB_BASE_URL}" \
   python -m verl.agent_trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
+    algorithm.adv_estimator=gae \
     algorithm.rounds_ctrl.type=fixed \
     algorithm.rounds_ctrl.rounds="${MAX_ROUNDS}" \
     data.train_file="${TRAIN_FILE}" \
@@ -137,12 +105,9 @@ exec env \
     data.max_response_length="${MAX_RESPONSE_LENGTH}" \
     actor_rollout_ref.agentgym.task_name="${TASK_NAME}" \
     actor_rollout_ref.agentgym.env_addr="${ENV_ADDR}" \
-    actor_rollout_ref.agentgym.timeout=2400 \
+    actor_rollout_ref.agentgym.timeout=600 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef="${KL_COEF}" \
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-    actor_rollout_ref.actor.world_model_coeff="${WMC_COEFF_VALUE}" \
+    actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.ppo_epochs="${PPO_EPOCHS}" \
     actor_rollout_ref.actor.optim.lr="${POLICY_LR}" \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
@@ -165,15 +130,11 @@ exec env \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.rollout_log_dir="${ROLLOUT_LOG_DIR}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+    critic.model.path="${MODEL_PATH}" \
+    critic.model.tokenizer_path="${MODEL_PATH}" \
+    critic.optim.lr="${CRITIC_LR}" \
+    critic.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
     algorithm.kl_ctrl.kl_coef="${KL_COEF}" \
-    wmc_erc.enable="${ERC_ENABLE_VALUE}" \
-    wmc_erc.mu_base="${ERC_MU_BASE}" \
-    wmc_erc.mu_exp="${ERC_MU_EXP}" \
-    wmc_erc.eta_wm="${ERC_ETA_WM}" \
-    wmc_erc.lambda_wm="${ERC_LAMBDA_WM}" \
-    wmc_erc.clipping_type="${ERC_CLIPPING_TYPE}" \
-    wmc_erc.clipping_method="${ERC_CLIPPING_METHOD}" \
-    wmc_erc.momentum="${ERC_MOMENTUM}" \
     trainer.project_name="${PROJECT_NAME}" \
     trainer.experiment_name="${EXP_NAME}" \
     trainer.default_local_dir="${CKPT_DIR}" \

@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+ALGO="${ALGO:-grpo}"
+case "${ALGO}" in
+  grpo|ppo)
+    ;;
+  *)
+    echo "Unsupported ALGO='${ALGO}'. Use 'grpo' or 'ppo'."
+    exit 1
+    ;;
+esac
+
+if [[ "${ALGO}" == "grpo" ]]; then
+  TRAIN_SCRIPT="${ROOT}/scripts/run_sciworld_grpo_train.sh"
+else
+  TRAIN_SCRIPT="${ROOT}/scripts/run_sciworld_ppo_train.sh"
+fi
+
+CONDA_SH="${CONDA_SH:-/home/yexuyan/miniconda3/etc/profile.d/conda.sh}"
+SCIWORLD_ENV="${SCIWORLD_ENV:-/idfsdata/yexuyan/conda_envs/agentenv-sciworld}"
+TRAIN_ENV="${TRAIN_ENV:-/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop}"
+
+ENV_PORT="${ENV_PORT:-36005}"
+ENV_ADDR="http://127.0.0.1:${ENV_PORT}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+MODEL_PATH="${MODEL_PATH:-${ROOT}/models/Qwen2.5-3B-Instruct}"
+
+WANDB_MODE="${WANDB_MODE:-online}"
+WANDB_ANONYMOUS="${WANDB_ANONYMOUS:-allow}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
+PROJECT_NAME="${PROJECT_NAME:-agentgym-sciworld}"
+
+KL_COEF="${KL_COEF:-0.001}"
+POLICY_LR="${POLICY_LR:-1e-6}"
+CRITIC_LR="${CRITIC_LR:-1e-5}"
+ROLLOUT_N="${ROLLOUT_N:-8}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
+PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-8}"
+PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
+PPO_EPOCHS="${PPO_EPOCHS:-2}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-2}"
+MAX_ROUNDS="${MAX_ROUNDS:-20}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+MAX_TOKENS_PER_TURN="${MAX_TOKENS_PER_TURN:-200}"
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.70}"
+REWARD_MODE="${REWARD_MODE:-score}"
+ORM_SUCCESS_SCORE="${ORM_SUCCESS_SCORE:-100.0}"
+PAD_TO_MAX_RESPONSE_LENGTH="${PAD_TO_MAX_RESPONSE_LENGTH:-1}"
+SAVE_FREQ="${SAVE_FREQ:-50}"
+REMOVE_PREVIOUS_CKPT_IN_SAVE="${REMOVE_PREVIOUS_CKPT_IN_SAVE:-0}"
+MAX_LOCAL_CKPT_TO_KEEP="${MAX_LOCAL_CKPT_TO_KEEP:-6}"
+
+ENABLE_WMC="${ENABLE_WMC:-0}"
+WMC_COEFF="${WMC_COEFF:-0.001}"
+ENABLE_ERC="${ENABLE_ERC:-0}"
+ERC_MU_BASE="${ERC_MU_BASE:-1.0}"
+ERC_MU_EXP="${ERC_MU_EXP:-2.0}"
+ERC_ETA_WM="${ERC_ETA_WM:-3.0}"
+ERC_LAMBDA_WM="${ERC_LAMBDA_WM:-1.0}"
+ERC_CLIPPING_TYPE="${ERC_CLIPPING_TYPE:-global}"
+ERC_CLIPPING_METHOD="${ERC_CLIPPING_METHOD:-mask}"
+ERC_MOMENTUM="${ERC_MOMENTUM:-0.9}"
+
+BASE_MODEL_NAME="$(basename "${MODEL_PATH}")"
+RUN_TS="$(date -u +%Y%m%d_%H%M%S)"
+EXP_NAME="${EXP_NAME:-sciworld_${ALGO}_${BASE_MODEL_NAME}_${RUN_TS}}"
+
+ENV_SESSION="${ENV_SESSION:-sciworld_env_${ENV_PORT}_${RUN_TS}}"
+TRAIN_SESSION="${TRAIN_SESSION:-sciworld_${ALGO}_${RUN_TS}}"
+ENV_LOG="${ROOT}/runlogs/${ENV_SESSION}.log"
+TRAIN_LOG="${ROOT}/runlogs/${EXP_NAME}/train.log"
+
+mkdir -p "${ROOT}/runlogs/${EXP_NAME}"
+
+if tmux has-session -t "${ENV_SESSION}" 2>/dev/null; then
+  echo "tmux session already exists: ${ENV_SESSION}"
+  exit 1
+fi
+if tmux has-session -t "${TRAIN_SESSION}" 2>/dev/null; then
+  echo "tmux session already exists: ${TRAIN_SESSION}"
+  exit 1
+fi
+
+tmux new-session -d -s "${ENV_SESSION}" \
+  "cd ${ROOT} && CONDA_SH=${CONDA_SH} SCIWORLD_ENV=${SCIWORLD_ENV} HOST=127.0.0.1 PORT=${ENV_PORT} LOG_PATH=${ENV_LOG} bash ${ROOT}/scripts/run_sciworld_env_service.sh"
+
+for _ in $(seq 1 60); do
+  if curl --noproxy '*' -sf "${ENV_ADDR}/" >/dev/null; then
+    break
+  fi
+  sleep 2
+done
+
+if ! curl --noproxy '*' -sf "${ENV_ADDR}/" >/dev/null; then
+  echo "SciWorld service did not become healthy on ${ENV_ADDR}"
+  exit 1
+fi
+
+WARMUP_RESP="$(curl --noproxy '*' --max-time 600 -sS -X POST "${ENV_ADDR}/create")"
+if command -v rg >/dev/null 2>&1; then
+  WARMUP_ID="$(printf '%s' "${WARMUP_RESP}" | rg -o '[0-9]+' | head -n 1 || true)"
+else
+  WARMUP_ID="$(printf '%s' "${WARMUP_RESP}" | grep -Eo '[0-9]+' | head -n 1 || true)"
+fi
+if [[ -n "${WARMUP_ID}" ]]; then
+  curl --noproxy '*' -sS -X POST "${ENV_ADDR}/close" \
+    -H 'Content-Type: application/json' \
+    -d "{\"id\": ${WARMUP_ID}}" >/dev/null || true
+fi
+
+tmux new-session -d -s "${TRAIN_SESSION}" \
+  "cd ${ROOT} && \
+    CONDA_SH=${CONDA_SH} TRAIN_ENV=${TRAIN_ENV} \
+    CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} \
+    ENV_ADDR=${ENV_ADDR} MODEL_PATH=${MODEL_PATH} \
+    WANDB_MODE=${WANDB_MODE} WANDB_ANONYMOUS=${WANDB_ANONYMOUS} WANDB_ENTITY=${WANDB_ENTITY} \
+    PROJECT_NAME=${PROJECT_NAME} \
+    KL_COEF=${KL_COEF} POLICY_LR=${POLICY_LR} CRITIC_LR=${CRITIC_LR} ROLLOUT_N=${ROLLOUT_N} \
+    TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE} \
+    PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU} \
+    PPO_EPOCHS=${PPO_EPOCHS} TOTAL_EPOCHS=${TOTAL_EPOCHS} \
+    MAX_ROUNDS=${MAX_ROUNDS} MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH} \
+    MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH} MAX_MODEL_LEN=${MAX_MODEL_LEN} \
+    MAX_TOKENS_PER_TURN=${MAX_TOKENS_PER_TURN} \
+    REWARD_MODE=${REWARD_MODE} ORM_SUCCESS_SCORE=${ORM_SUCCESS_SCORE} \
+    PAD_TO_MAX_RESPONSE_LENGTH=${PAD_TO_MAX_RESPONSE_LENGTH} \
+    ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION} \
+    SAVE_FREQ=${SAVE_FREQ} REMOVE_PREVIOUS_CKPT_IN_SAVE=${REMOVE_PREVIOUS_CKPT_IN_SAVE} \
+    MAX_LOCAL_CKPT_TO_KEEP=${MAX_LOCAL_CKPT_TO_KEEP} \
+    ENABLE_WMC=${ENABLE_WMC} WMC_COEFF=${WMC_COEFF} ENABLE_ERC=${ENABLE_ERC} \
+    ERC_MU_BASE=${ERC_MU_BASE} ERC_MU_EXP=${ERC_MU_EXP} ERC_ETA_WM=${ERC_ETA_WM} \
+    ERC_LAMBDA_WM=${ERC_LAMBDA_WM} ERC_CLIPPING_TYPE=${ERC_CLIPPING_TYPE} \
+    ERC_CLIPPING_METHOD=${ERC_CLIPPING_METHOD} ERC_MOMENTUM=${ERC_MOMENTUM} \
+    EXP_NAME=${EXP_NAME} LOG_PATH=${TRAIN_LOG} bash ${TRAIN_SCRIPT}"
+
+echo "Algorithm: ${ALGO}"
+echo "Environment tmux session: ${ENV_SESSION}"
+echo "Training tmux session: ${TRAIN_SESSION}"
+echo "SciWorld service: ${ENV_ADDR}"
+echo "Environment log: ${ENV_LOG}"
+echo "Training log: ${TRAIN_LOG}"
+echo "Warmup env id: ${WARMUP_ID}"

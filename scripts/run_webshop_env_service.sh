@@ -19,6 +19,17 @@ set +u
 conda activate "${WEBSHOP_ENV}"
 set -u
 
+# Some conda env activation scripts override HF cache to /tmp.
+# Force caches back to /idfsdata to avoid writing to /tmp or /home.
+if [[ -z "${HF_HOME:-}" || "${HF_HOME}" == /tmp/* || "${HF_HOME}" == /home/* ]]; then
+  HF_HOME="/idfsdata/yexuyan/hw"
+fi
+if [[ -z "${TRANSFORMERS_CACHE:-}" || "${TRANSFORMERS_CACHE}" == /tmp/* || "${TRANSFORMERS_CACHE}" == /home/* ]]; then
+  TRANSFORMERS_CACHE="${HF_HOME}/hub"
+fi
+mkdir -p "${HF_HOME}" "${TRANSFORMERS_CACHE}"
+export HF_HOME TRANSFORMERS_CACHE
+
 export WEBSHOP_DATASET_SIZE="${WEBSHOP_DATASET_SIZE:-all}"
 export WEBSHOP_GOAL_SOURCE="${WEBSHOP_GOAL_SOURCE:-human}"
 export WEBSHOP_HUMAN_GOAL_MODE="${WEBSHOP_HUMAN_GOAL_MODE:-official}"
@@ -32,6 +43,8 @@ exec env \
   -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
   NO_PROXY="${NO_PROXY}" \
   no_proxy="${no_proxy}" \
+  HF_HOME="${HF_HOME}" \
+  TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE}" \
   WEBSHOP_DATASET_SIZE="${WEBSHOP_DATASET_SIZE}" \
   WEBSHOP_GOAL_SOURCE="${WEBSHOP_GOAL_SOURCE}" \
   WEBSHOP_HUMAN_GOAL_MODE="${WEBSHOP_HUMAN_GOAL_MODE}" \

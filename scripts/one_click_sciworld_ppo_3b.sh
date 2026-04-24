@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd /idfsdata/yexuyan/AgentGym-RL
+
+CONDA_SH=/home/yexuyan/miniconda3/etc/profile.d/conda.sh \
+SCIWORLD_ENV=/idfsdata/yexuyan/conda_envs/agentenv-sciworld \
+TRAIN_ENV=/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop \
+ALGO=ppo \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+MODEL_PATH=/idfsdata/yexuyan/AgentGym-RL/models/Qwen2.5-3B-Instruct \
+EXP_NAME=${EXP_NAME:-PPO-3B-$(date -u +%m%d-%H%M%S)} \
+ENV_PORT=${ENV_PORT:-36007} \
+WANDB_MODE=${WANDB_MODE:-online} \
+PROJECT_NAME=${PROJECT_NAME:-agentgym-sciworld} \
+KL_COEF=${KL_COEF:-0.001} \
+POLICY_LR=${POLICY_LR:-1e-6} \
+CRITIC_LR=${CRITIC_LR:-1e-5} \
+ROLLOUT_N=${ROLLOUT_N:-8} \
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-16} \
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8} \
+PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1} \
+PPO_EPOCHS=${PPO_EPOCHS:-2} \
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-2} \
+MAX_ROUNDS=${MAX_ROUNDS:-20} \
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024} \
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-4096} \
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384} \
+MAX_TOKENS_PER_TURN=${MAX_TOKENS_PER_TURN:-200} \
+ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.70} \
+SAVE_FREQ=${SAVE_FREQ:-50} \
+REMOVE_PREVIOUS_CKPT_IN_SAVE=${REMOVE_PREVIOUS_CKPT_IN_SAVE:-0} \
+MAX_LOCAL_CKPT_TO_KEEP=${MAX_LOCAL_CKPT_TO_KEEP:-6} \
+ENABLE_WMC=0 \
+ENABLE_ERC=0 \
+bash /idfsdata/yexuyan/AgentGym-RL/scripts/launch_sciworld_rl_tmux.sh

@@ -30,14 +30,91 @@ from verl.utils.model import compute_position_id_with_mask
 
 import pandas as pd
 
-from transformers import AutoTokenizer
-
 from verl import DataProto
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.workers.agent_fsdp_workers import ActorRolloutRefWorker
-from verl.utils.hdfs_io import makedirs
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils.agentgym.client import init_env_client
+
+
+SCIWORLD_TASK_TO_TOPIC = {
+    "boil": "Matter",
+    "melt": "Matter",
+    "freeze": "Matter",
+    "change-the-state-of-matter-of": "Matter",
+    "use-thermometer": "Measurement",
+    "measure-melting-point-known-substance": "Measurement",
+    "measure-melting-point-unknown-substance": "Measurement",
+    "power-component": "Electricity",
+    "power-component-renewable-vs-nonrenewable-energy": "Electricity",
+    "test-conductivity": "Electricity",
+    "test-conductivity-of-unknown-substances": "Electricity",
+    "find-living-thing": "Classification",
+    "find-non-living-thing": "Classification",
+    "find-plant": "Classification",
+    "find-animal": "Classification",
+    "grow-plant": "Biology",
+    "grow-fruit": "Biology",
+    "chemistry-mix": "Chemistry",
+    "chemistry-mix-paint-secondary-color": "Chemistry",
+    "chemistry-mix-paint-tertiary-color": "Chemistry",
+    "lifespan-longest-lived": "Biology",
+    "lifespan-shortest-lived": "Biology",
+    "lifespan-longest-lived-then-shortest-lived": "Biology",
+    "identify-life-stages-1": "Biology",
+    "identify-life-stages-2": "Biology",
+    "inclined-plane-determine-angle": "Forces",
+    "inclined-plane-friction-named-surfaces": "Forces",
+    "inclined-plane-friction-unnamed-surfaces": "Forces",
+    "mendelian-genetics-known-plant": "Biology",
+    "mendelian-genetics-unknown-plant": "Biology",
+}
+
+
+def _extract_item_index(item_id):
+    try:
+        return int(str(item_id).split("_")[-1])
+    except Exception:
+        return None
+
+
+def _build_item_metadata(env_client, item_ids):
+    metadata = {}
+    total = len(item_ids)
+    for idx, item_id in enumerate(item_ids):
+        item_index = _extract_item_index(item_id)
+        task_name = "unknown_task"
+        topic = "Unknown"
+        if item_index is not None:
+            try:
+                reset_info = env_client.reset(item_index)
+                task_name = reset_info.get("task_name", "unknown_task")
+                topic = SCIWORLD_TASK_TO_TOPIC.get(task_name, "Unknown")
+            except Exception as e:
+                print(f"Failed to resolve topic for item_id={item_id}: {e}")
+        metadata[item_id] = {"task_name": task_name, "topic": topic}
+        if (idx + 1) % 50 == 0 or idx + 1 == total:
+            print(f"Resolved item metadata: {idx + 1}/{total}")
+    return metadata
+
+
+def _aggregate_metrics(score_np, done_np, success_score=100.0):
+    # Strict success:
+    # - If success_score is None: done=True is enough.
+    # - Else: done=True and score reaches success_score.
+    if success_score is None:
+        success_mask = done_np > 0
+    else:
+        success_mask = np.logical_and(
+            done_np > 0,
+            np.isclose(score_np, float(success_score), rtol=0.0, atol=1e-6),
+        )
+    return {
+        "score": float(np.mean(score_np)),
+        "pass": float(np.mean(np.max(score_np, axis=-1) > 0)),
+        "succ": float(np.mean(np.max(success_mask, axis=-1) > 0)),
+        "count": int(score_np.shape[0]),
+    }
 
 
 @hydra.main(config_path='config', config_name='generation', version_base=None)
@@ -56,16 +133,6 @@ def main(config):
     # read dataset. Note that the dataset should directly contain chat template format (e.g., a list of dictionary)
     dataset = pd.read_json(os.path.join(config.data.path, f"{config.agentgym.task_name}_test.json"))
     item_ids = dataset[config.data.prompt_key].tolist()
-    # load sub category test file
-    category_files = os.listdir(config.data.path)
-    category_files = [f for f in category_files if not f.startswith(f"{config.agentgym.task_name}_test")]
-    category_map = {}
-    for category_file in category_files:
-        path = os.path.join(config.data.path, category_file)
-        with open(path, "r") as f:
-            datas = json.load(f)
-            for data in datas:
-                category_map[data["item_id"]] = category_file.split(".")[0]
 
     tokenizer.padding_side = 'left'
     if tokenizer.pad_token is None:
@@ -81,8 +148,17 @@ def main(config):
     config_batch_size = config.data.batch_size
     dp_size = wg.world_size // config.rollout.tensor_model_parallel_size
     num_batch = (total_samples // config_batch_size) + 1
-    output_lst = [[] for _ in range(config.data.n_samples)]
+    score_lst = [[] for _ in range(config.data.n_samples)]
+    done_lst = [[] for _ in range(config.data.n_samples)]
     env_client = init_env_client(config.agentgym)
+    if str(config.agentgym.task_name).lower() == "sciworld":
+        item_metadata = _build_item_metadata(env_client, item_ids)
+    else:
+        # Avoid expensive per-item reset probing on non-SciWorld tasks.
+        item_metadata = {
+            item_id: {"task_name": "unknown_task", "topic": "All"}
+            for item_id in item_ids
+        }
 
     for batch_idx in range(num_batch):
         print(f'[{batch_idx+1}/{num_batch}] Start to process.')
@@ -126,27 +202,73 @@ def main(config):
             # remove dummy data
             output = output[:real_batch_size]
 
-            output_lst[i].extend(output.batch['task_scores'].sum(dim=-1).tolist())
+            score_lst[i].extend(output.batch['task_scores'].sum(dim=-1).tolist())
+            if 'task_dones' in output.batch.keys():
+                done_lst[i].extend(output.batch['task_dones'].tolist())
+            else:
+                # Backward compatible fallback if rollout worker does not emit task_dones.
+                done_lst[i].extend([0.0] * real_batch_size)
 
-    # convert output_lst from (n_samples, n_data) to (n_data, n_sampels)
-    output_np = np.array(output_lst, dtype=object)
-    output_np = np.transpose(output_np, axes=(1, 0))
-    output_lst = output_np.tolist()
+    # convert from (n_samples, n_data) to (n_data, n_samples)
+    score_np = np.array(score_lst, dtype=np.float32).transpose(1, 0)
+    done_np = np.array(done_lst, dtype=np.float32).transpose(1, 0)
+    task_name_lower = str(config.agentgym.task_name).lower()
+    # Task-specific strict success threshold.
+    # - SciWorld: done + score==100
+    # - ALFWorld: done + won==1 (score==1)
+    # - WebShop: done + reward score==1 (exact purchase match)
+    # - BabyAI: done=True
+    success_score = 100.0
+    if task_name_lower in {"alfworld", "webshop"}:
+        success_score = 1.0
+    elif task_name_lower == "babyai":
+        success_score = None
+    overall_metrics = _aggregate_metrics(score_np, done_np, success_score=success_score)
 
     print("============Total Task Evaluation============")
-    print(f"Avg@{config.data.n_samples}: {np.mean(output_np)}")
-    print(f"Pass@{config.data.n_samples}: {np.mean(np.max(output_np, axis=-1) > 0)}")
-    print("============Sub Task Evaluation============")
-    
-    category_success_bucket = defaultdict(list)
-    for item_id, score in zip(item_ids, output_lst):
-        category = category_map[item_id]
-        category_success_bucket[category].append(score)
-    for category_file in category_files:
-        category = category_file.split(".")[0]
-        print(f"Category: {category}")
-        print(f"Avg@{config.data.n_samples}: {np.mean(np.array(category_success_bucket[category]))}")
-        print(f"Pass@{config.data.n_samples}: {np.mean(np.max(np.array(category_success_bucket[category]), axis=-1) > 0)}")
+    print(f"Score@{config.data.n_samples}: {overall_metrics['score']}")
+    print(f"Avg@{config.data.n_samples}: {overall_metrics['score']}")
+    print(f"Pass@{config.data.n_samples}: {overall_metrics['pass']}")
+    if success_score is None:
+        print("Succ definition: done=True")
+    else:
+        print(f"Succ definition: done=True and score={success_score}")
+    print(f"Succ@{config.data.n_samples}: {overall_metrics['succ']}")
+    print("============Per Topic Evaluation============")
+
+    topic_scores = defaultdict(list)
+    topic_dones = defaultdict(list)
+    for idx, item_id in enumerate(item_ids):
+        topic = item_metadata.get(item_id, {}).get("topic", "Unknown")
+        topic_scores[topic].append(score_np[idx].tolist())
+        topic_dones[topic].append(done_np[idx].tolist())
+
+    per_topic_metrics = {}
+    for topic in sorted(topic_scores.keys()):
+        topic_score_np = np.array(topic_scores[topic], dtype=np.float32)
+        topic_done_np = np.array(topic_dones[topic], dtype=np.float32)
+        metrics = _aggregate_metrics(topic_score_np, topic_done_np, success_score=success_score)
+        per_topic_metrics[topic] = metrics
+        print(f"Topic: {topic}")
+        print(f"Score@{config.data.n_samples}: {metrics['score']}")
+        if success_score is None:
+            print("Succ definition: done=True")
+        else:
+            print(f"Succ definition: done=True and score={success_score}")
+        print(f"Succ@{config.data.n_samples}: {metrics['succ']}")
+        print(f"Pass@{config.data.n_samples}: {metrics['pass']}")
+
+    metrics_json = {
+        "n_samples": int(config.data.n_samples),
+        "overall": overall_metrics,
+        "per_topic": per_topic_metrics,
+    }
+    print("METRICS_JSON:", json.dumps(metrics_json, sort_keys=True))
+
+    try:
+        env_client.close()
+    except Exception:
+        pass
 
 
 

@@ -2,20 +2,15 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRAIN_CODE_DIR="${ROOT}/AgentGym-RL"
 CONDA_SH="${CONDA_SH:-/home/yexuyan/miniconda3/etc/profile.d/conda.sh}"
 TRAIN_ENV="${TRAIN_ENV:-/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop}"
-WEBSHOP_ENV="${WEBSHOP_ENV:-/idfsdata/yexuyan/conda_envs/agentenv-webshop}"
-
 MODEL_PATH="${MODEL_PATH:-${ROOT}/models/Qwen2.5-3B-Instruct}"
-TASK_NAME="webshop"
+TASK_NAME="sciworld"
 
-ENV_HOST="${ENV_HOST:-127.0.0.1}"
-ENV_PORT="${ENV_PORT:-8011}"
-ENV_ADDR="http://${ENV_HOST}:${ENV_PORT}"
-
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,6,7}"
+ENV_ADDR="${ENV_ADDR:-http://127.0.0.1:36005}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 IFS=',' read -r -a GPU_ARRAY <<< "${CUDA_VISIBLE_DEVICES}"
 NUM_GPUS="${#GPU_ARRAY[@]}"
 if (( NUM_GPUS < 1 )); then
@@ -25,7 +20,7 @@ fi
 
 WANDB_MODE="${WANDB_MODE:-offline}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
-PROJECT_NAME="${PROJECT_NAME:-agentgym-webshop}"
+PROJECT_NAME="${PROJECT_NAME:-agentgym-sciworld}"
 
 KL_COEF="${KL_COEF:-0.001}"
 POLICY_LR="${POLICY_LR:-1e-6}"
@@ -35,13 +30,21 @@ PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-8}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 PPO_EPOCHS="${PPO_EPOCHS:-2}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-2}"
-MAX_ROUNDS="${MAX_ROUNDS:-15}"
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-768}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-8192}"
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-}"
+MAX_ROUNDS="${MAX_ROUNDS:-20}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
-MAX_TOKENS_PER_TURN="${MAX_TOKENS_PER_TURN:-256}"
-ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.60}"
-SAVE_FREQ="${SAVE_FREQ:-200}"
+MAX_TOKENS_PER_TURN="${MAX_TOKENS_PER_TURN:-200}"
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.70}"
+REWARD_MODE="${REWARD_MODE:-score}"
+ORM_SUCCESS_SCORE="${ORM_SUCCESS_SCORE:-100.0}"
+PAD_TO_MAX_RESPONSE_LENGTH="${PAD_TO_MAX_RESPONSE_LENGTH:-1}"
+SAVE_FREQ="${SAVE_FREQ:-50}"
+REMOVE_PREVIOUS_CKPT_IN_SAVE="${REMOVE_PREVIOUS_CKPT_IN_SAVE:-0}"
+MAX_LOCAL_CKPT_TO_KEEP="${MAX_LOCAL_CKPT_TO_KEEP:-6}"
+RESUME_MODE="${RESUME_MODE:-auto}"
+RESUME_FROM_PATH="${RESUME_FROM_PATH:-0}"
 
 ENABLE_WMC="${ENABLE_WMC:-0}"
 WMC_COEFF="${WMC_COEFF:-0.001}"
@@ -54,31 +57,18 @@ ERC_CLIPPING_TYPE="${ERC_CLIPPING_TYPE:-global}"
 ERC_CLIPPING_METHOD="${ERC_CLIPPING_METHOD:-mask}"
 ERC_MOMENTUM="${ERC_MOMENTUM:-0.9}"
 
-MODE_TAG="grpo"
-if [[ "${ENABLE_WMC}" == "1" && "${ENABLE_ERC}" == "1" ]]; then
-  MODE_TAG="grpo_wmc_erc"
-elif [[ "${ENABLE_WMC}" == "1" ]]; then
-  MODE_TAG="grpo_wmc"
-elif [[ "${ENABLE_ERC}" == "1" ]]; then
-  MODE_TAG="grpo_erc"
-fi
-
-BASE_MODEL_NAME="$(basename "${MODEL_PATH}")"
-RUN_TS="$(date -u +%Y%m%d_%H%M%S)"
-EXP_NAME="${EXP_NAME:-${TASK_NAME}_${MODE_TAG}_${BASE_MODEL_NAME}_${RUN_TS}}"
-
-RUN_DIR="${RUN_DIR:-${ROOT}/runlogs/${EXP_NAME}}"
+EXP_NAME="${EXP_NAME:-sciworld_grpo_$(basename "${MODEL_PATH}")_$(date -u +%Y%m%d_%H%M%S)}"
 CKPT_DIR="${CKPT_DIR:-${ROOT}/checkpoints/${EXP_NAME}}"
+RUN_DIR="${RUN_DIR:-${ROOT}/runlogs/${EXP_NAME}}"
 ROLLOUT_LOG_DIR="${ROLLOUT_LOG_DIR:-${RUN_DIR}/rollout_logs}"
-TRAIN_LOG="${RUN_DIR}/train.log"
-ENV_LOG="${RUN_DIR}/webshop_env.log"
-ENV_PID_FILE="${RUN_DIR}/webshop_env.pid"
-TRAIN_PID_FILE="${RUN_DIR}/train.pid"
-WARMUP_ID_FILE="${RUN_DIR}/webshop_warmup_env_id.txt"
+TRAIN_FILE="${TRAIN_FILE:-${ROOT}/AgentItemId/sciworld_train.json}"
+LOG_PATH="${LOG_PATH:-}"
 
-TRAIN_FILE="${TRAIN_FILE:-${ROOT}/AgentItemId/train/webshop_train.json}"
-
-mkdir -p "${RUN_DIR}" "${CKPT_DIR}" "${ROLLOUT_LOG_DIR}"
+mkdir -p "${CKPT_DIR}" "${RUN_DIR}" "${ROLLOUT_LOG_DIR}"
+if [[ -n "${LOG_PATH}" ]]; then
+  mkdir -p "$(dirname "${LOG_PATH}")"
+  exec >"${LOG_PATH}" 2>&1
+fi
 
 REAL_TRAIN_BATCH_SIZE=$(( TRAIN_BATCH_SIZE * ROLLOUT_N ))
 if (( REAL_TRAIN_BATCH_SIZE % NUM_GPUS != 0 )); then
@@ -87,74 +77,15 @@ if (( REAL_TRAIN_BATCH_SIZE % NUM_GPUS != 0 )); then
   exit 1
 fi
 
-if [[ ! -f "${MODEL_PATH}/config.json" ]]; then
-  echo "Model path does not look valid: ${MODEL_PATH}"
+if [[ ! -f "${TRAIN_FILE}" ]]; then
+  echo "SciWorld train file not found: ${TRAIN_FILE}"
   exit 1
 fi
 
 source "${CONDA_SH}"
-
-conda_activate_safe() {
-  set +u
-  conda activate "$1"
-  set -u
-}
-
-conda_deactivate_safe() {
-  set +u
-  conda deactivate || true
-  set -u
-}
-
-conda_activate_safe "${TRAIN_ENV}"
-python "${ROOT}/scripts/prepare_webshop_grpo_splits.py"
-conda_deactivate_safe
-
-export WEBSHOP_DATASET_SIZE="all"
-export WEBSHOP_GOAL_SOURCE="human"
-export WEBSHOP_HUMAN_GOAL_MODE="official"
-export WEBSHOP_GOAL_SPLIT="train"
-export NO_PROXY="127.0.0.1,localhost"
-export no_proxy="127.0.0.1,localhost"
-
-if lsof -iTCP:"${ENV_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "Port ${ENV_PORT} is already listening. Reusing existing WebShop service."
-else
-  conda_activate_safe "${WEBSHOP_ENV}"
-  nohup env \
-    -u http_proxy -u https_proxy -u all_proxy \
-    -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
-    NO_PROXY="${NO_PROXY}" \
-    no_proxy="${no_proxy}" \
-    WEBSHOP_DATASET_SIZE="${WEBSHOP_DATASET_SIZE}" \
-    WEBSHOP_GOAL_SOURCE="${WEBSHOP_GOAL_SOURCE}" \
-    WEBSHOP_HUMAN_GOAL_MODE="${WEBSHOP_HUMAN_GOAL_MODE}" \
-    WEBSHOP_GOAL_SPLIT="${WEBSHOP_GOAL_SPLIT}" \
-    webshop --host "${ENV_HOST}" --port "${ENV_PORT}" \
-    > "${ENV_LOG}" 2>&1 &
-  ENV_PID=$!
-  printf '%s\n' "${ENV_PID}" > "${ENV_PID_FILE}"
-  conda_deactivate_safe
-fi
-
-for _ in $(seq 1 60); do
-  if curl --noproxy '*' -sf "${ENV_ADDR}/" >/dev/null; then
-    break
-  fi
-  sleep 2
-done
-
-if ! curl --noproxy '*' -sf "${ENV_ADDR}/" >/dev/null; then
-  echo "WebShop service did not become healthy: ${ENV_ADDR}"
-  exit 1
-fi
-
-echo "Warming up full WebShop data..."
-WARMUP_ID="$(curl --noproxy '*' --max-time 1800 -sS -X POST "${ENV_ADDR}/create")"
-printf '%s\n' "${WARMUP_ID}" > "${WARMUP_ID_FILE}"
-curl --noproxy '*' -sS -X POST "${ENV_ADDR}/close" \
-  -H 'Content-Type: application/json' \
-  -d "{\"env_idx\": ${WARMUP_ID}}" >/dev/null || true
+set +u
+conda activate "${TRAIN_ENV}"
+set -u
 
 WMC_COEFF_VALUE="0.0"
 if [[ "${ENABLE_WMC}" == "1" ]]; then
@@ -166,10 +97,31 @@ if [[ "${ENABLE_ERC}" == "1" ]]; then
   ERC_ENABLE_VALUE="True"
 fi
 
-conda_activate_safe "${TRAIN_ENV}"
-cd "${TRAIN_CODE_DIR}"
+REMOVE_PREVIOUS_CKPT_IN_SAVE_VALUE="False"
+if [[ "${REMOVE_PREVIOUS_CKPT_IN_SAVE}" == "1" ]]; then
+  REMOVE_PREVIOUS_CKPT_IN_SAVE_VALUE="True"
+fi
 
-nohup env \
+RESUME_FROM_PATH_VALUE="False"
+if [[ "${RESUME_FROM_PATH}" == "1" ]]; then
+  RESUME_FROM_PATH_VALUE="True"
+fi
+
+PAD_TO_MAX_RESPONSE_LENGTH_VALUE="True"
+if [[ "${PAD_TO_MAX_RESPONSE_LENGTH}" == "0" ]]; then
+  PAD_TO_MAX_RESPONSE_LENGTH_VALUE="False"
+fi
+
+TOTAL_TRAINING_STEPS_ARGS=()
+if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
+  TOTAL_TRAINING_STEPS_ARGS+=(trainer.total_training_steps="${TOTAL_TRAINING_STEPS}")
+fi
+
+export NO_PROXY="${NO_PROXY:-127.0.0.1,localhost}"
+export no_proxy="${no_proxy:-127.0.0.1,localhost}"
+
+cd "${TRAIN_CODE_DIR}"
+exec env \
   -u http_proxy -u https_proxy -u all_proxy \
   -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
   NO_PROXY="${NO_PROXY}" \
@@ -192,7 +144,7 @@ nohup env \
     data.max_response_length="${MAX_RESPONSE_LENGTH}" \
     actor_rollout_ref.agentgym.task_name="${TASK_NAME}" \
     actor_rollout_ref.agentgym.env_addr="${ENV_ADDR}" \
-    actor_rollout_ref.agentgym.timeout=2400 \
+    actor_rollout_ref.agentgym.timeout=600 \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef="${KL_COEF}" \
@@ -212,6 +164,9 @@ nohup env \
     actor_rollout_ref.rollout.n="${ROLLOUT_N}" \
     actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
     actor_rollout_ref.rollout.max_tokens="${MAX_TOKENS_PER_TURN}" \
+    actor_rollout_ref.rollout.reward_mode="${REWARD_MODE}" \
+    actor_rollout_ref.rollout.orm_success_score="${ORM_SUCCESS_SCORE}" \
+    +actor_rollout_ref.rollout.pad_to_max_response_length="${PAD_TO_MAX_RESPONSE_LENGTH_VALUE}" \
     actor_rollout_ref.rollout.max_num_batched_tokens=16384 \
     actor_rollout_ref.rollout.max_num_seqs=128 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
@@ -231,27 +186,11 @@ nohup env \
     trainer.experiment_name="${EXP_NAME}" \
     trainer.default_local_dir="${CKPT_DIR}" \
     trainer.save_freq="${SAVE_FREQ}" \
-    trainer.remove_previous_ckpt_in_save=True \
+    trainer.remove_previous_ckpt_in_save="${REMOVE_PREVIOUS_CKPT_IN_SAVE_VALUE}" \
+    trainer.max_local_ckpt_to_keep="${MAX_LOCAL_CKPT_TO_KEEP}" \
     trainer.total_epochs="${TOTAL_EPOCHS}" \
+    trainer.resume_mode="${RESUME_MODE}" \
+    trainer.resume_from_path="${RESUME_FROM_PATH_VALUE}" \
+    "${TOTAL_TRAINING_STEPS_ARGS[@]}" \
     trainer.nnodes=1 \
-    trainer.n_gpus_per_node="${NUM_GPUS}" \
-    > "${TRAIN_LOG}" 2>&1 &
-
-TRAIN_PID=$!
-printf '%s\n' "${TRAIN_PID}" > "${TRAIN_PID_FILE}"
-
-echo "WebShop GRPO has started in the background."
-echo "Experiment: ${EXP_NAME}"
-echo "WebShop service: ${ENV_ADDR}"
-echo "Train file: ${TRAIN_FILE}"
-echo "Checkpoint dir: ${CKPT_DIR}"
-echo "Run log dir: ${RUN_DIR}"
-echo "Env log: ${ENV_LOG}"
-echo "Train log: ${TRAIN_LOG}"
-if [[ -f "${ENV_PID_FILE}" ]]; then
-  echo "Env PID: $(cat "${ENV_PID_FILE}")"
-fi
-echo "Train PID: $(cat "${TRAIN_PID_FILE}")"
-echo "Warmup env id: $(cat "${WARMUP_ID_FILE}")"
-echo "Follow training log with:"
-echo "tail -f ${TRAIN_LOG}"
+    trainer.n_gpus_per_node="${NUM_GPUS}"

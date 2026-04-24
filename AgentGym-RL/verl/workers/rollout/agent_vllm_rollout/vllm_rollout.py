@@ -130,6 +130,31 @@ class vLLMRollout(BaseRollout):
         self.pad_token_id = tokenizer.pad_token_id
 
         self.tokenizer = tokenizer
+        self.reward_mode = str(self.config.get('reward_mode', 'score')).lower()
+        self.orm_success_score = float(self.config.get('orm_success_score', 100.0))
+        self.pad_to_max_response_length = bool(self.config.get('pad_to_max_response_length', True))
+        valid_reward_modes = {"score", "orm_binary"}
+        if self.reward_mode not in valid_reward_modes:
+            raise ValueError(
+                f"Unsupported reward_mode={self.reward_mode}. "
+                f"Expected one of {sorted(valid_reward_modes)}"
+            )
+        print(
+            f"rollout reward mode: {self.reward_mode} "
+            f"(orm_success_score={self.orm_success_score}, "
+            f"pad_to_max_response_length={self.pad_to_max_response_length})"
+        )
+
+    def _shape_task_reward(self, task_score: float, task_done: bool, task_name: str = "") -> float:
+        if self.reward_mode == "score":
+            return float(task_score)
+        if self.reward_mode == "orm_binary":
+            # ALFWorld wrapper exposes info["won"] as task_score (0/1).
+            # For ALFWorld ORM, reward should be binary by won directly.
+            if str(task_name).lower() == "alfworld":
+                return 1.0 if float(task_score) >= 1.0 else 0.0
+            return 1.0 if bool(task_done) and float(task_score) >= self.orm_success_score else 0.0
+        raise ValueError(f"Unsupported reward_mode={self.reward_mode}")
 
 
     @contextmanager
@@ -279,7 +304,7 @@ class vLLMRollout(BaseRollout):
         # process ids
         rollout_bar.close()
         response_ids, response_attention_mask, response_position_ids, response_loss_mask, response_observation_mask = [], [], [], [], []
-        scores, messages = [], []
+        scores, raw_scores, messages, task_dones = [], [], [], []
         
         for rollout_handler in rollout_handler_ls:
             # check length
@@ -293,21 +318,29 @@ class vLLMRollout(BaseRollout):
             response_position_ids.append(torch.tensor(rollout_handler.response_position_ids, dtype=torch.int, device=cur_device))
             response_loss_mask.append(torch.tensor(rollout_handler.response_loss_mask, dtype=torch.int, device=cur_device))
             response_observation_mask.append(torch.tensor(rollout_handler.response_observation_mask, dtype=torch.int, device=cur_device))
-            scores.append(rollout_handler.score)
+            raw_scores.append(float(rollout_handler.score))
+            scores.append(
+                self._shape_task_reward(
+                    task_score=rollout_handler.score,
+                    task_done=rollout_handler.done,
+                    task_name=rollout_handler.task_name,
+                )
+            )
             messages.append(rollout_handler.messages)
+            task_dones.append(1.0 if rollout_handler.done else 0.0)
         
         # pad to length
         response_ids = pad_sequence(response_ids, batch_first=True, padding_value=self.pad_token_id)
-        if response_ids.shape[1] < self.config.response_length:
+        if self.pad_to_max_response_length and response_ids.shape[1] < self.config.response_length:
             response_ids = pad_sequence_to_length(response_ids, self.config.response_length, self.pad_token_id)
         response_attention_mask = pad_sequence(response_attention_mask, batch_first=True, padding_value=0)
-        if response_attention_mask.shape[1] < self.config.response_length:
+        if self.pad_to_max_response_length and response_attention_mask.shape[1] < self.config.response_length:
             response_attention_mask = pad_sequence_to_length(response_attention_mask, self.config.response_length, 0)
         response_loss_mask = pad_sequence(response_loss_mask, batch_first=True, padding_value=0)
-        if response_loss_mask.shape[1] < self.config.response_length:
+        if self.pad_to_max_response_length and response_loss_mask.shape[1] < self.config.response_length:
             response_loss_mask = pad_sequence_to_length(response_loss_mask, self.config.response_length, 0)
         response_observation_mask = pad_sequence(response_observation_mask, batch_first=True, padding_value=0)
-        if response_observation_mask.shape[1] < self.config.response_length:
+        if self.pad_to_max_response_length and response_observation_mask.shape[1] < self.config.response_length:
             response_observation_mask = pad_sequence_to_length(response_observation_mask, self.config.response_length, 0)
         response_length = response_ids.size(1)
         delta_position_ids = torch.arange(1, response_length + 1, device=cur_device)
@@ -329,9 +362,11 @@ class vLLMRollout(BaseRollout):
         observation_mask = response_attention_mask * (1 - response_mask)
 
         reward_tensor = torch.zeros_like(response_ids, dtype=torch.float32) # (bs, response_length)
+        raw_reward_tensor = torch.zeros_like(response_ids, dtype=torch.float32) # (bs, response_length)
         valid_response_length = attention_mask[:, prompt_length:].sum(dim=-1)
         for i in range(len(scores)):
             reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
+            raw_reward_tensor[i, valid_response_length[i].item() - 1] = raw_scores[i]
 
         if global_steps:
             try:
@@ -342,7 +377,9 @@ class vLLMRollout(BaseRollout):
                         records = {
                             "item_id": rollout_handler_ls[idx].item_id,
                             "conversations": [msg.to_dict() for msg in msgs],
-                            "reward": scores[idx]
+                            "reward": scores[idx],
+                            "raw_score": raw_scores[idx],
+                            "done": bool(task_dones[idx] > 0),
                         }
                         json_msg.append(records)
                     json.dump(json_msg, f, ensure_ascii=True, indent=4)
@@ -367,7 +404,9 @@ class vLLMRollout(BaseRollout):
                 'observation_mask': observation_mask,
                 'scores': reward_tensor,
                 'task_rounds': torch.tensor(task_rounds, dtype=torch.float32).to(input_ids.device),
-                'task_scores': reward_tensor
+                'task_scores': reward_tensor,
+                'task_raw_scores': raw_reward_tensor,
+                'task_dones': torch.tensor(task_dones, dtype=torch.float32).to(input_ids.device),
             },
             batch_size=batch_size)
         
