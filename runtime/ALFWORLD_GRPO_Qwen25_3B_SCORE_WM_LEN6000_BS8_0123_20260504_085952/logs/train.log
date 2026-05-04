@@ -1,0 +1,44 @@
+/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/transformers/utils/hub.py:105: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+[2026-05-04 09:00:27,497] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+Error executing job with overrides: ['algorithm.adv_estimator=grpo', 'algorithm.rounds_ctrl.type=fixed', 'algorithm.rounds_ctrl.rounds=30', 'data.train_file=/idfsdata/yexuyan/AgentGym-RL/AgentItemId/alfworld_train.json', 'data.train_batch_size=8', 'data.max_prompt_length=1024', 'data.max_response_length=6000', 'actor_rollout_ref.agentgym.task_name=alfworld', 'actor_rollout_ref.agentgym.env_addr=http://127.0.0.1:36001', 'actor_rollout_ref.agentgym.timeout=600', 'actor_rollout_ref.agentgym.max_rounds=10', 'actor_rollout_ref.model.path=/idfsdata/yexuyan/AgentGym-RL/models/Qwen2.5-3B-Instruct', 'actor_rollout_ref.actor.use_kl_loss=True', 'actor_rollout_ref.actor.kl_loss_coef=0.001', 'actor_rollout_ref.actor.kl_loss_type=low_var_kl', 'actor_rollout_ref.actor.world_model_coeff=0.001', 'actor_rollout_ref.actor.ppo_epochs=2', 'actor_rollout_ref.actor.optim.lr=1e-6', 'actor_rollout_ref.actor.ppo_mini_batch_size=2', 'actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1', 'actor_rollout_ref.rollout.name=vllm', 'actor_rollout_ref.rollout.dtype=bfloat16', 'actor_rollout_ref.rollout.enforce_eager=True', 'actor_rollout_ref.rollout.free_cache_engine=True', 'actor_rollout_ref.rollout.load_format=dummy_dtensor', 'actor_rollout_ref.rollout.enable_chunked_prefill=True', 'actor_rollout_ref.rollout.gpu_memory_utilization=0.70', 'actor_rollout_ref.rollout.n=8', 'actor_rollout_ref.rollout.max_model_len=16384', 'actor_rollout_ref.rollout.max_tokens=200', '+actor_rollout_ref.rollout.reward_mode=score', '+actor_rollout_ref.rollout.orm_success_score=100.0', '+actor_rollout_ref.rollout.pad_to_max_response_length=True', 'actor_rollout_ref.rollout.max_num_batched_tokens=16384', 'actor_rollout_ref.rollout.max_num_seqs=128', 'actor_rollout_ref.rollout.tensor_model_parallel_size=1', 'actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1', 'actor_rollout_ref.rollout.rollout_log_dir=/idfsdata/yexuyan/AgentGym-RL/runtime/ALFWORLD_GRPO_Qwen25_3B_SCORE_WM_LEN6000_BS8_0123_20260504_085952/rollout_logs', 'actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1', 'algorithm.kl_ctrl.kl_coef=0.001', 'wmc_erc.enable=False', 'wmc_erc.mu_base=1.0', 'wmc_erc.mu_exp=2.0', 'wmc_erc.eta_wm=3.0', 'wmc_erc.lambda_wm=1.0', 'wmc_erc.clipping_type=global', 'wmc_erc.clipping_method=mask', 'wmc_erc.momentum=0.9', 'trainer.project_name=ALFWorld', 'trainer.experiment_name=ALFWORLD_GRPO_Qwen25_3B_SCORE_WM_LEN6000_BS8_0123_20260504_085952', 'trainer.default_local_dir=/idfsdata/yexuyan/AgentGym-RL/runtime/ALFWORLD_GRPO_Qwen25_3B_SCORE_WM_LEN6000_BS8_0123_20260504_085952/checkpoints', 'trainer.save_freq=50', 'trainer.remove_previous_ckpt_in_save=False', 'trainer.max_local_ckpt_to_keep=6', 'trainer.total_epochs=2', 'trainer.resume_mode=auto', 'trainer.resume_from_path=False', 'trainer.nnodes=1', 'trainer.n_gpus_per_node=4']
+Traceback (most recent call last):
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/idfsdata/yexuyan/AgentGym-RL/AgentGym-RL/verl/agent_trainer/main_ppo.py", line 96, in <module>
+    main()
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/hydra/main.py", line 94, in decorated_main
+    _run_hydra(
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/hydra/_internal/utils.py", line 394, in _run_hydra
+    _run_app(
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/hydra/_internal/utils.py", line 457, in _run_app
+    run_and_report(
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/hydra/_internal/utils.py", line 223, in run_and_report
+    raise ex
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/hydra/_internal/utils.py", line 220, in run_and_report
+    return func()
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/hydra/_internal/utils.py", line 458, in <lambda>
+    lambda: hydra.run(
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/hydra/_internal/hydra.py", line 132, in run
+    _ = ret.return_value
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/hydra/core/utils.py", line 260, in return_value
+    raise self._return_value
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/hydra/core/utils.py", line 186, in run_job
+    ret.return_value = task_function(task_cfg)
+  File "/idfsdata/yexuyan/AgentGym-RL/AgentGym-RL/verl/agent_trainer/main_ppo.py", line 25, in main
+    run_ppo(config)
+  File "/idfsdata/yexuyan/AgentGym-RL/AgentGym-RL/verl/agent_trainer/main_ppo.py", line 31, in run_ppo
+    ray.init(runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}})
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/ray/_private/client_mode_hook.py", line 104, in wrapper
+    return func(*args, **kwargs)
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/ray/_private/worker.py", line 1908, in init
+    _global_node = ray._private.node.Node(
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/ray/_private/node.py", line 287, in __init__
+    self._plasma_store_socket_name = self._prepare_socket_file(
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/ray/_private/node.py", line 980, in _prepare_socket_file
+    validate_socket_filepath(result.split("://", 1)[-1])
+  File "/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop/lib/python3.10/site-packages/ray/_private/utils.py", line 1665, in validate_socket_filepath
+    raise OSError(
+OSError: validate_socket_filename failed: AF_UNIX path length cannot exceed 107 bytes: /idfsdata/yexuyan/AgentGym-RL/runtime/ALFWORLD_GRPO_Qwen25_3B_SCORE_WM_LEN6000_BS8_0123_20260504_085952/ray/ray/session_2026-05-04_09-00-35_106613_380999/sockets/plasma_store

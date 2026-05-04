@@ -228,7 +228,7 @@ class ActorRolloutRefWorker(Worker):
 
         auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get('wrap_policy', None))
 
-        if self._is_rollout and self.config.rollout.name == 'hf':
+        if self._is_rollout and self.config.rollout.name in {'hf', 'alfworld_rwml_hf'}:
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
             auto_wrap_policy = None
 
@@ -281,6 +281,27 @@ class ActorRolloutRefWorker(Worker):
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config
 
     def _build_rollout(self):
+        if self.config.rollout.name == 'alfworld_rwml_hf':
+            from omegaconf import OmegaConf
+            from verl.workers.rollout.alfworld_rwml import ALFWorldRWMLHFRollout
+            from verl.workers.sharding_manager.base import BaseShardingManager
+            from verl.utils.rwml.alfworld_reward import (
+                ALFWorldRWMLRewardConfig,
+                ALFWorldRWMLRewardScorer,
+            )
+
+            rwml_reward_cfg = OmegaConf.to_container(self.config.rollout.get('rwml_reward', OmegaConf.create()), resolve=True)
+            reward_device = rwml_reward_cfg.pop("device", "cuda")
+            reward_config = ALFWorldRWMLRewardConfig(**rwml_reward_cfg)
+            reward_scorer = ALFWorldRWMLRewardScorer(config=reward_config, device=reward_device)
+            rollout = ALFWorldRWMLHFRollout(
+                module=self.actor_module_fsdp,
+                config=self.config.rollout,
+                tokenizer=self.tokenizer,
+                reward_scorer=reward_scorer,
+            )
+            return rollout, BaseShardingManager()
+
         from torch.distributed.device_mesh import init_device_mesh
         # TODO(sgm): support FSDP hybrid shard for larger model
         infer_tp = self.config.rollout.tensor_model_parallel_size

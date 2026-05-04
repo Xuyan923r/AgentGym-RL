@@ -16,6 +16,7 @@ Generate responses given a dataset of prompts
 """
 from collections import defaultdict
 import json
+import math
 import ray
 import numpy as np
 import hydra
@@ -130,8 +131,13 @@ def main(config):
     if config.rollout.temperature == 0.:
         assert config.data.n_samples == 1, 'When temperature=0, n_samples must be 1.'
 
-    # read dataset. Note that the dataset should directly contain chat template format (e.g., a list of dictionary)
-    dataset = pd.read_json(os.path.join(config.data.path, f"{config.agentgym.task_name}_test.json"))
+    # read dataset. By default we read {data.path}/{task_name}_test.json for evaluation,
+    # but callers can override with data.input_file to reuse the same rollout path on
+    # arbitrary splits such as ALFWorld train ids for RWML data collection.
+    input_file = getattr(config.data, "input_file", None)
+    if input_file is None:
+        input_file = os.path.join(config.data.path, f"{config.agentgym.task_name}_test.json")
+    dataset = pd.read_json(input_file)
     item_ids = dataset[config.data.prompt_key].tolist()
 
     tokenizer.padding_side = 'left'
@@ -147,7 +153,8 @@ def main(config):
     # real_batch_size = data.batch['input_ids'].shape[0]
     config_batch_size = config.data.batch_size
     dp_size = wg.world_size // config.rollout.tensor_model_parallel_size
-    num_batch = (total_samples // config_batch_size) + 1
+    num_batch = math.ceil(total_samples / config_batch_size)
+    start_batch_idx = int(getattr(config.data, "start_batch_idx", 0) or 0)
     score_lst = [[] for _ in range(config.data.n_samples)]
     done_lst = [[] for _ in range(config.data.n_samples)]
     env_client = init_env_client(config.agentgym)
@@ -161,10 +168,14 @@ def main(config):
         }
 
     for batch_idx in range(num_batch):
-        print(f'[{batch_idx+1}/{num_batch}] Start to process.')
+        display_batch_idx = start_batch_idx + batch_idx
+        print(f'[{display_batch_idx+1}/{start_batch_idx + num_batch}] Start to process.')
         start_idx = batch_idx * config_batch_size
         end_idx = min(total_samples, start_idx + config_batch_size)
         batch_item_ids = item_ids[start_idx: end_idx]
+        if not batch_item_ids:
+            print(f'[{display_batch_idx+1}/{start_batch_idx + num_batch}] Empty batch, skip.')
+            continue
         prompt_with_chat_template = ["<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n" + env_client.conversation_start[0]["value"] + "<|im_end|>\n<|im_start|>assistant\n" + env_client.conversation_start[1]["value"] + "<|im_end|>" for _ in range(len(batch_item_ids))]
         messages = [[{"role": "user", "content": env_client.conversation_start[0]["value"]},
                      {"role": "assistant", "content": env_client.conversation_start[1]["value"]}] for _ in range(len(batch_item_ids))]
@@ -179,7 +190,7 @@ def main(config):
         batch_dict = {'input_ids': input_ids, 'attention_mask': attention_mask, 'position_ids': position_ids}
 
         data = DataProto.from_dict(batch_dict)
-        data.meta_info['global_steps'] = 'test_batch_' + str(batch_idx)
+        data.meta_info['global_steps'] = 'test_batch_' + str(display_batch_idx)
         data.meta_info['max_rounds'] = config.agentgym.max_rounds
         data.non_tensor_batch["item_id"] = np.array(batch_item_ids, dtype=object)
         data.non_tensor_batch["raw_prompt"] = np.array(messages, dtype=object)
@@ -195,7 +206,7 @@ def main(config):
         batch_size = data.batch['input_ids'].shape[0]
         assert batch_size % dp_size == 0, f'batch_size {batch_size} is not divisible by dp_size {dp_size}'
 
-        print(f'[{batch_idx+1}/{num_batch}] Start to generate.')
+        print(f'[{display_batch_idx+1}/{start_batch_idx + num_batch}] Start to generate.')
 
         for i in range(config.data.n_samples):
             output = wg.generate_sequences(data)

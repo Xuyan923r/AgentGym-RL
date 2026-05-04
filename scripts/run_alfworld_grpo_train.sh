@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRAIN_CODE_DIR="${ROOT}/AgentGym-RL"
 CONDA_SH="${CONDA_SH:-/home/yexuyan/miniconda3/etc/profile.d/conda.sh}"
 TRAIN_ENV="${TRAIN_ENV:-/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop}"
-MODEL_PATH="${MODEL_PATH:-/idfsdata/yexuyan/AgentGym-RL/models/Qwen2.5-7B-Instruct}"
+MODEL_PATH="${MODEL_PATH:-/idfsdata/yexuyan/AgentGym-RL/models/Qwen2.5-3B-Instruct}"
 TASK_NAME="alfworld"
 
 ENV_ADDR="${ENV_ADDR:-http://127.0.0.1:36001}"
@@ -19,14 +19,15 @@ if (( NUM_GPUS < 1 )); then
 fi
 
 WANDB_MODE="${WANDB_MODE:-online}"
-WANDB_ENTITY="${WANDB_ENTITY:-}"
+WANDB_ENTITY="${WANDB_ENTITY:-xuyan923r-renmin-university-of-china}"
 WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.wandb.ai}"
 PROJECT_NAME="${PROJECT_NAME:-ALFWorld}"
+HOME="${HOME:-${ROOT}/runtime/alfworld_train_home}"
 
-# Keep defaults aligned with the historical ALFWorld GRPO score run.
+# Keep defaults aligned with the historical ALFWorld GRPO score run,
+# except this script defaults to the 3B model with wm loss enabled.
 KL_COEF="${KL_COEF:-0.001}"
 POLICY_LR="${POLICY_LR:-1e-6}"
-CRITIC_LR="${CRITIC_LR:-1e-5}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-2}"
@@ -43,14 +44,14 @@ MAX_TOKENS_PER_TURN="${MAX_TOKENS_PER_TURN:-200}"
 ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.70}"
 REWARD_MODE="${REWARD_MODE:-score}"
 ORM_SUCCESS_SCORE="${ORM_SUCCESS_SCORE:-100.0}"
-PAD_TO_MAX_RESPONSE_LENGTH="${PAD_TO_MAX_RESPONSE_LENGTH:-0}"
+PAD_TO_MAX_RESPONSE_LENGTH="${PAD_TO_MAX_RESPONSE_LENGTH:-1}"
 SAVE_FREQ="${SAVE_FREQ:-50}"
 REMOVE_PREVIOUS_CKPT_IN_SAVE="${REMOVE_PREVIOUS_CKPT_IN_SAVE:-0}"
 MAX_LOCAL_CKPT_TO_KEEP="${MAX_LOCAL_CKPT_TO_KEEP:-6}"
 RESUME_MODE="${RESUME_MODE:-auto}"
 RESUME_FROM_PATH="${RESUME_FROM_PATH:-0}"
 
-ENABLE_WMC="${ENABLE_WMC:-0}"
+ENABLE_WMC="${ENABLE_WMC:-1}"
 WMC_COEFF="${WMC_COEFF:-0.001}"
 ENABLE_ERC="${ENABLE_ERC:-0}"
 ERC_MU_BASE="${ERC_MU_BASE:-1.0}"
@@ -68,12 +69,14 @@ TMP="${TMP:-${TMPDIR}}"
 TEMP="${TEMP:-${TMPDIR}}"
 HF_HOME="${HF_HOME:-/idfsdata/yexuyan/he}"
 TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"
+HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 XDG_CACHE_HOME="${XDG_CACHE_HOME:-/idfsdata/yexuyan/xe}"
 WANDB_DIR="${WANDB_DIR:-/idfsdata/yexuyan/we}"
 WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-${WANDB_DIR}/.cache}"
 WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-${WANDB_DIR}/.config}"
+WANDB_DATA_DIR="${WANDB_DATA_DIR:-${WANDB_DIR}/.local/share}"
 
-EXP_NAME="${EXP_NAME:-ALFWORLD_PPO_$(basename "${MODEL_PATH}")_$(date -u +%Y%m%d_%H%M%S)}"
+EXP_NAME="${EXP_NAME:-ALFWORLD_GRPO_Qwen25_3B_SCORE_WM_LEN6000_BS8_0123_$(date -u +%Y%m%d_%H%M%S)}"
 CKPT_DIR="${CKPT_DIR:-${ROOT}/checkpoints/${EXP_NAME}}"
 RUN_DIR="${RUN_DIR:-${ROOT}/runlogs/${EXP_NAME}}"
 ROLLOUT_LOG_DIR="${ROLLOUT_LOG_DIR:-${RUN_DIR}/rollout_logs}"
@@ -81,9 +84,10 @@ TRAIN_FILE="${TRAIN_FILE:-${ROOT}/AgentItemId/alfworld_train.json}"
 LOG_PATH="${LOG_PATH:-}"
 
 mkdir -p \
-  "${CKPT_DIR}" "${RUN_DIR}" "${ROLLOUT_LOG_DIR}" \
+  "${HOME}" "${CKPT_DIR}" "${RUN_DIR}" "${ROLLOUT_LOG_DIR}" \
   "${RAY_TMPDIR}" "${TMPDIR}" "${HF_HOME}" "${TRANSFORMERS_CACHE}" \
-  "${XDG_CACHE_HOME}" "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
+  "${HF_DATASETS_CACHE}" "${XDG_CACHE_HOME}" "${WANDB_DIR}" "${WANDB_CACHE_DIR}" \
+  "${WANDB_CONFIG_DIR}" "${WANDB_DATA_DIR}"
 
 if [[ -n "${LOG_PATH}" ]]; then
   mkdir -p "$(dirname "${LOG_PATH}")"
@@ -127,9 +131,9 @@ if [[ "${RESUME_FROM_PATH}" == "1" ]]; then
   RESUME_FROM_PATH_VALUE="True"
 fi
 
-PAD_TO_MAX_RESPONSE_LENGTH_ARGS=()
-if [[ "${PAD_TO_MAX_RESPONSE_LENGTH}" == "1" ]]; then
-  PAD_TO_MAX_RESPONSE_LENGTH_ARGS+=(+actor_rollout_ref.rollout.pad_to_max_response_length=True)
+PAD_TO_MAX_RESPONSE_LENGTH_VALUE="True"
+if [[ "${PAD_TO_MAX_RESPONSE_LENGTH}" == "0" ]]; then
+  PAD_TO_MAX_RESPONSE_LENGTH_VALUE="False"
 fi
 
 TOTAL_TRAINING_STEPS_ARGS=()
@@ -146,6 +150,7 @@ exec env \
   -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
   NO_PROXY="${NO_PROXY}" \
   no_proxy="${no_proxy}" \
+  HOME="${HOME}" \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
   RAY_TMPDIR="${RAY_TMPDIR}" \
   TMPDIR="${TMPDIR}" \
@@ -153,10 +158,12 @@ exec env \
   TEMP="${TEMP}" \
   HF_HOME="${HF_HOME}" \
   TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE}" \
+  HF_DATASETS_CACHE="${HF_DATASETS_CACHE}" \
   XDG_CACHE_HOME="${XDG_CACHE_HOME}" \
   WANDB_DIR="${WANDB_DIR}" \
   WANDB_CACHE_DIR="${WANDB_CACHE_DIR}" \
   WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR}" \
+  WANDB_DATA_DIR="${WANDB_DATA_DIR}" \
   VLLM_USE_MODELSCOPE=0 \
   VLLM_WORKER_MULTIPROC_METHOD=spawn \
   VLLM_ATTENTION_BACKEND=FLASH_ATTN \
@@ -166,7 +173,7 @@ exec env \
   WANDB_ENTITY="${WANDB_ENTITY}" \
   WANDB_BASE_URL="${WANDB_BASE_URL}" \
   python -m verl.agent_trainer.main_ppo \
-    algorithm.adv_estimator=gae \
+    algorithm.adv_estimator=grpo \
     algorithm.rounds_ctrl.type=fixed \
     algorithm.rounds_ctrl.rounds="${MAX_ROUNDS}" \
     data.train_file="${TRAIN_FILE}" \
@@ -198,17 +205,13 @@ exec env \
     actor_rollout_ref.rollout.max_tokens="${MAX_TOKENS_PER_TURN}" \
     +actor_rollout_ref.rollout.reward_mode="${REWARD_MODE}" \
     +actor_rollout_ref.rollout.orm_success_score="${ORM_SUCCESS_SCORE}" \
-    "${PAD_TO_MAX_RESPONSE_LENGTH_ARGS[@]}" \
+    +actor_rollout_ref.rollout.pad_to_max_response_length="${PAD_TO_MAX_RESPONSE_LENGTH_VALUE}" \
     actor_rollout_ref.rollout.max_num_batched_tokens=16384 \
     actor_rollout_ref.rollout.max_num_seqs=128 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.rollout_log_dir="${ROLLOUT_LOG_DIR}" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
-    critic.model.path="${MODEL_PATH}" \
-    critic.model.tokenizer_path="${MODEL_PATH}" \
-    critic.optim.lr="${CRITIC_LR}" \
-    critic.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
     algorithm.kl_ctrl.kl_coef="${KL_COEF}" \
     wmc_erc.enable="${ERC_ENABLE_VALUE}" \
     wmc_erc.mu_base="${ERC_MU_BASE}" \

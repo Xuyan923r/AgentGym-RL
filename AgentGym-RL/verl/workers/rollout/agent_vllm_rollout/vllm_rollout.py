@@ -102,6 +102,7 @@ class vLLMRollout(BaseRollout):
             load_format=rollout_config.load_format,
             disable_log_stats=rollout_config.disable_log_stats,
             max_num_batched_tokens=max_num_batched_tokens,
+            max_model_len=rollout_config.max_model_len,
             enable_chunked_prefill=rollout_config.enable_chunked_prefill,
         )
 

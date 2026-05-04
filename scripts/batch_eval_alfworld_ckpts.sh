@@ -16,10 +16,13 @@ SKIP_DONE_MODELS="${SKIP_DONE_MODELS:-0}"
 MAX_ROUND="${MAX_ROUND:-30}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MAX_TOKENS_PER_TURN="${MAX_TOKENS_PER_TURN:-200}"
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-2400}"
 N_SAMPLES="${N_SAMPLES:-1}"
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.84}"
+ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-128}"
+ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-16384}"
 
 # Preferred high-concurrency batch size. Per-model auto-fallback is applied if OOM.
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-64}"
@@ -139,23 +142,6 @@ for ckpt_dir in "${CKPTS_7B[@]}"; do
   MODEL_PATHS+=("${ckpt_dir}/actor/huggingface")
 done
 
-is_7b_model() {
-  local label="$1"
-  local path="$2"
-  local low="${label,,} ${path,,}"
-  if [[ "${low}" == *"7b"* ]]; then
-    return 0
-  fi
-  return 1
-}
-
-is_oom_log() {
-  local log_file="$1"
-  grep -Eiq \
-    "cuda out of memory|outofmemoryerror|no available memory for the cache blocks|oom|allocation failed|device out of memory" \
-    "${log_file}"
-}
-
 has_hf_weights() {
   local model_path="$1"
   [[ -f "${model_path}/model.safetensors.index.json" || -f "${model_path}/model.safetensors" || -f "${model_path}/pytorch_model.bin" ]]
@@ -195,117 +181,62 @@ ensure_model_weights() {
   return 1
 }
 
-run_one_model_with_fallback() {
+run_one_model() {
   local model_label="$1"
   local model_path="$2"
   local log_path="$3"
   local run_dir="$4"
 
-  local -a candidates=()
-  if is_7b_model "${model_label}" "${model_path}"; then
-    # 7B: start aggressive then fallback.
-    candidates=(
-      "64:0.86:256:32768"
-      "48:0.84:192:24576"
-      "32:0.82:160:20480"
-      "24:0.80:128:16384"
-    )
-  else
-    # 3B: higher concurrency.
-    candidates=(
-      "${EVAL_BATCH_SIZE}:0.90:384:49152"
-      "80:0.88:320:40960"
-      "64:0.86:256:32768"
-      "48:0.84:192:24576"
-      "32:0.82:160:20480"
-    )
-  fi
+  {
+    echo "===== EVAL START model=${model_label} ====="
+    echo "batch_size=${EVAL_BATCH_SIZE} gpu_util=${ROLLOUT_GPU_MEMORY_UTILIZATION} max_num_seqs=${ROLLOUT_MAX_NUM_SEQS} max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS}"
+  } | tee -a "${log_path}"
 
-  # Remove duplicate candidate lines while preserving order.
-  local dedup_file="${run_dir}/candidate_dedup.txt"
-  : > "${dedup_file}"
-  for c in "${candidates[@]}"; do
-    if ! grep -Fxq "${c}" "${dedup_file}"; then
-      echo "${c}" >> "${dedup_file}"
-    fi
-  done
-  mapfile -t candidates < "${dedup_file}"
-
-  local ok=0
-  local attempt=0
-  for c in "${candidates[@]}"; do
-    attempt=$((attempt + 1))
-    IFS=':' read -r batch_size gpu_util max_num_seqs max_num_batched_tokens <<< "${c}"
-    local attempt_log="${run_dir}/eval_attempt_${attempt}.log"
-
-    {
-      echo "===== ATTEMPT ${attempt} model=${model_label} ====="
-      echo "batch_size=${batch_size} gpu_util=${gpu_util} max_num_seqs=${max_num_seqs} max_num_batched_tokens=${max_num_batched_tokens}"
-    } | tee -a "${log_path}"
-
-    if (
-      cd "${CODE_DIR}"
-      exec env \
-        -u http_proxy -u https_proxy -u all_proxy \
-        -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
-        NO_PROXY="${NO_PROXY}" \
-        no_proxy="${no_proxy}" \
-        TMPDIR="${TMPDIR}" \
-        TMP="${TMP}" \
-        TEMP="${TEMP}" \
-        HF_HOME="${HF_HOME}" \
-        TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE}" \
-        XDG_CACHE_HOME="${XDG_CACHE_HOME}" \
-        WANDB_DIR="${WANDB_DIR}" \
-        WANDB_CACHE_DIR="${WANDB_CACHE_DIR}" \
-        WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR}" \
-        RAY_TMPDIR="${RAY_TMPDIR}" \
-        CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
-        VLLM_USE_MODELSCOPE=0 \
-        VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        VLLM_ATTENTION_BACKEND=XFORMERS \
-        HYDRA_FULL_ERROR=1 \
-        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-        python -m verl.agent_trainer.main_generation \
-          data.path="${EVAL_DATA_DIR}" \
-          data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
-          data.max_response_length="${MAX_RESPONSE_LENGTH}" \
-          data.n_samples="${N_SAMPLES}" \
-          data.batch_size="${batch_size}" \
-          agentgym.task_name=alfworld \
-          agentgym.env_addr="${ENV_ADDR}" \
-          agentgym.max_rounds="${MAX_ROUND}" \
-          agentgym.timeout="${AGENT_TIMEOUT}" \
-          model.path="${model_path}" \
-          rollout.gpu_memory_utilization="${gpu_util}" \
-          rollout.temperature=1 \
-          rollout.max_model_len="${MAX_MODEL_LEN}" \
-          rollout.max_tokens="${MAX_TOKENS_PER_TURN}" \
-          rollout.max_num_seqs="${max_num_seqs}" \
-          rollout.max_num_batched_tokens="${max_num_batched_tokens}" \
-          rollout.tensor_model_parallel_size=1 \
-          rollout.rollout_log_dir="${run_dir}/executer_logs" \
-          trainer.nnodes=1 \
-          trainer.n_gpus_per_node="${NUM_GPUS}"
-    ) 2>&1 | tee "${attempt_log}" | tee -a "${log_path}"; then
-      ok=1
-      break
-    else
-      if is_oom_log "${attempt_log}"; then
-        echo "OOM detected on attempt ${attempt}, fallback to lower concurrency..." | tee -a "${log_path}"
-        continue
-      fi
-      echo "Non-OOM failure on attempt ${attempt}, aborting model ${model_label}." | tee -a "${log_path}"
-      return 1
-    fi
-  done
-
-  if [[ "${ok}" != "1" ]]; then
-    echo "All fallback attempts failed for ${model_label}." | tee -a "${log_path}"
-    return 1
-  fi
-
-  return 0
+  (
+    cd "${CODE_DIR}"
+    exec env \
+      -u http_proxy -u https_proxy -u all_proxy \
+      -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+      NO_PROXY="${NO_PROXY}" \
+      no_proxy="${no_proxy}" \
+      TMPDIR="${TMPDIR}" \
+      TMP="${TMP}" \
+      TEMP="${TEMP}" \
+      HF_HOME="${HF_HOME}" \
+      TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE}" \
+      XDG_CACHE_HOME="${XDG_CACHE_HOME}" \
+      WANDB_DIR="${WANDB_DIR}" \
+      WANDB_CACHE_DIR="${WANDB_CACHE_DIR}" \
+      WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR}" \
+      RAY_TMPDIR="${RAY_TMPDIR}" \
+      CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+      VLLM_USE_MODELSCOPE=0 \
+      VLLM_WORKER_MULTIPROC_METHOD=spawn \
+      VLLM_ATTENTION_BACKEND=XFORMERS \
+      HYDRA_FULL_ERROR=1 \
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+      python -m verl.agent_trainer.main_generation \
+        data.path="${EVAL_DATA_DIR}" \
+        data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
+        data.max_response_length="${MAX_RESPONSE_LENGTH}" \
+        data.n_samples="${N_SAMPLES}" \
+        data.batch_size="${EVAL_BATCH_SIZE}" \
+        agentgym.task_name=alfworld \
+        agentgym.env_addr="${ENV_ADDR}" \
+        agentgym.max_rounds="${MAX_ROUND}" \
+        agentgym.timeout="${AGENT_TIMEOUT}" \
+        model.path="${model_path}" \
+        rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
+        rollout.temperature=1 \
+        rollout.max_model_len="${MAX_MODEL_LEN}" \
+        rollout.max_tokens="${MAX_TOKENS_PER_TURN}" \
+        rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}" \
+        rollout.max_num_batched_tokens="${ROLLOUT_MAX_NUM_BATCHED_TOKENS}" \
+        rollout.tensor_model_parallel_size=1 \
+        rollout.rollout_log_dir="${run_dir}/executer_logs" \
+        trainer.nnodes=1 \
+        trainer.n_gpus_per_node="${NUM_GPUS}"
+  ) 2>&1 | tee "${log_path}"
 }
 
 for idx in "${!MODEL_LABELS[@]}"; do
@@ -332,8 +263,7 @@ for idx in "${!MODEL_LABELS[@]}"; do
   metrics_json_path="${run_dir}/metrics.json"
   mkdir -p "${run_dir}"
 
-  echo "===== EVAL START model=${model_label} =====" | tee -a "${log_path}"
-  run_one_model_with_fallback "${model_label}" "${model_path}" "${log_path}" "${run_dir}"
+  run_one_model "${model_label}" "${model_path}" "${log_path}" "${run_dir}"
 
   python3 - "${log_path}" "${metrics_json_path}" <<'PY'
 import json
