@@ -71,6 +71,64 @@ SCIWORLD_TASK_TO_TOPIC = {
     "mendelian-genetics-unknown-plant": "Biology",
 }
 
+SCIWORLD_TOPIC_ALIASES = {
+    "Biology": "Bio.",
+    "Chemistry": "Chem.",
+    "Classification": "Class.",
+    "Electricity": "Elec.",
+    "Matter": "Matt.",
+    "Measurement": "Meas",
+    "Forces": "Forces",
+}
+
+SCIWORLD_TOPIC_ORDER = {
+    "Bio.": 0,
+    "Chem.": 1,
+    "Class.": 2,
+    "Elec.": 3,
+    "Matt.": 4,
+    "Meas": 5,
+    "Forces": 6,
+}
+
+ALFWORLD_TASK_PREFIX_TO_TOPIC = [
+    ("pick_and_place_simple-", "Pick"),
+    ("look_at_obj_in_light-", "Look"),
+    ("pick_clean_then_place_in_recep-", "Clean"),
+    ("pick_heat_then_place_in_recep-", "Heat"),
+    ("pick_cool_then_place_in_recep-", "Cool"),
+    ("pick_two_obj_and_place-", "Pick2"),
+]
+
+ALFWORLD_TOPIC_ORDER = {
+    "Pick": 0,
+    "Look": 1,
+    "Clean": 2,
+    "Heat": 3,
+    "Cool": 4,
+    "Pick2": 5,
+}
+
+
+def _normalize_sciworld_topic(topic):
+    return SCIWORLD_TOPIC_ALIASES.get(topic, topic or "Unknown")
+
+
+def _normalize_alfworld_topic(task_type):
+    task_type = str(task_type or "")
+    for prefix, topic in ALFWORLD_TASK_PREFIX_TO_TOPIC:
+        if task_type.startswith(prefix):
+            return topic
+    return "Unknown"
+
+
+def _topic_sort_key(task_name_lower, topic):
+    if task_name_lower == "alfworld":
+        return (ALFWORLD_TOPIC_ORDER.get(topic, 10**6), topic)
+    if task_name_lower == "sciworld":
+        return (SCIWORLD_TOPIC_ORDER.get(topic, 10**6), topic)
+    return (10**6, topic)
+
 
 def _extract_item_index(item_id):
     try:
@@ -96,6 +154,28 @@ def _build_item_metadata(env_client, item_ids):
         metadata[item_id] = {"task_name": task_name, "topic": topic}
         if (idx + 1) % 50 == 0 or idx + 1 == total:
             print(f"Resolved item metadata: {idx + 1}/{total}")
+    return metadata
+
+
+def _build_alfworld_item_metadata(item_ids, mappings_path):
+    with open(mappings_path, "r", encoding="utf-8") as f:
+        mappings = json.load(f)
+
+    mapping_by_item_id = {}
+    for row in mappings:
+        item_id = f"alfworld_{int(row['item_id'])}"
+        task_type = row.get("task_type", "")
+        mapping_by_item_id[item_id] = {
+            "task_name": task_type,
+            "topic": _normalize_alfworld_topic(task_type),
+        }
+
+    metadata = {}
+    for item_id in item_ids:
+        metadata[item_id] = mapping_by_item_id.get(
+            item_id,
+            {"task_name": "unknown_task", "topic": "Unknown"},
+        )
     return metadata
 
 
@@ -158,10 +238,21 @@ def main(config):
     score_lst = [[] for _ in range(config.data.n_samples)]
     done_lst = [[] for _ in range(config.data.n_samples)]
     env_client = init_env_client(config.agentgym)
-    if str(config.agentgym.task_name).lower() == "sciworld":
+    task_name_lower = str(config.agentgym.task_name).lower()
+    if task_name_lower == "sciworld":
         item_metadata = _build_item_metadata(env_client, item_ids)
+        for item_id, meta in item_metadata.items():
+            meta["topic"] = _normalize_sciworld_topic(meta.get("topic"))
+    elif task_name_lower == "alfworld":
+        mappings_path = getattr(config.data, "topic_mapping_file", None)
+        if mappings_path is None:
+            mappings_path = os.path.join(
+                config.data.path,
+                "alfworld_test_mappings.json",
+            )
+        item_metadata = _build_alfworld_item_metadata(item_ids, mappings_path)
     else:
-        # Avoid expensive per-item reset probing on non-SciWorld tasks.
+        # Avoid expensive per-item reset probing on unrelated tasks.
         item_metadata = {
             item_id: {"task_name": "unknown_task", "topic": "All"}
             for item_id in item_ids
@@ -223,7 +314,6 @@ def main(config):
     # convert from (n_samples, n_data) to (n_data, n_samples)
     score_np = np.array(score_lst, dtype=np.float32).transpose(1, 0)
     done_np = np.array(done_lst, dtype=np.float32).transpose(1, 0)
-    task_name_lower = str(config.agentgym.task_name).lower()
     # Task-specific strict success threshold.
     # - SciWorld: done + score==100
     # - ALFWorld: done + won==1 (score==1)
@@ -255,7 +345,7 @@ def main(config):
         topic_dones[topic].append(done_np[idx].tolist())
 
     per_topic_metrics = {}
-    for topic in sorted(topic_scores.keys()):
+    for topic in sorted(topic_scores.keys(), key=lambda x: _topic_sort_key(task_name_lower, x)):
         topic_score_np = np.array(topic_scores[topic], dtype=np.float32)
         topic_done_np = np.array(topic_dones[topic], dtype=np.float32)
         metrics = _aggregate_metrics(topic_score_np, topic_done_np, success_score=success_score)

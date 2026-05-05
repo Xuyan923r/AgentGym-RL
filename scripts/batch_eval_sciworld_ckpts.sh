@@ -14,9 +14,14 @@ OVERWRITE_RESULTS="${OVERWRITE_RESULTS:-1}"
 SKIP_DONE_MODELS="${SKIP_DONE_MODELS:-1}"
 INCLUDE_BASE_MODEL="${INCLUDE_BASE_MODEL:-1}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-64}"
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.95}"
+ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-256}"
+ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-32768}"
+ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-32768}"
 BASE_MODEL_PATH="${BASE_MODEL_PATH:-/idfsdata/yexuyan/AgentGym-RL/models/Qwen2.5-3B-Instruct}"
+BASE_MODEL_LABEL="${BASE_MODEL_LABEL:-base_model}"
 CKPT_ROOT="${CKPT_ROOT:-${ROOT}/checkpoints/GRPO-3B-0414}"
-CKPT_STEPS_STR="${CKPT_STEPS_STR:-50 100 150 200}"
+CKPT_STEPS_STR="${CKPT_STEPS_STR-50 100 150 200}"
 
 if [[ "${OVERWRITE_RESULTS}" == "1" ]]; then
   : > "${RESULTS_FILE}"
@@ -85,6 +90,7 @@ if (( EVAL_BATCH_SIZE % NUM_GPUS != 0 )); then
   EVAL_BATCH_SIZE="${ADJUSTED_BATCH_SIZE}"
 fi
 echo "Using EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE}, NUM_GPUS=${NUM_GPUS}"
+echo "Using rollout config: gpu_util=${ROLLOUT_GPU_MEMORY_UTILIZATION}, max_num_seqs=${ROLLOUT_MAX_NUM_SEQS}, max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS}, max_model_len=${ROLLOUT_MAX_MODEL_LEN}"
 
 read -r -a CKPT_STEPS <<< "${CKPT_STEPS_STR}"
 
@@ -92,7 +98,7 @@ MODEL_LABELS=()
 MODEL_PATHS=()
 
 if [[ "${INCLUDE_BASE_MODEL}" == "1" ]]; then
-  MODEL_LABELS+=("base_model")
+  MODEL_LABELS+=("${BASE_MODEL_LABEL}")
   MODEL_PATHS+=("${BASE_MODEL_PATH}")
 fi
 
@@ -127,6 +133,7 @@ for idx in "${!MODEL_LABELS[@]}"; do
   fi
 
   echo "===== EVAL START model=${model_label} ====="
+  echo "batch_size=${EVAL_BATCH_SIZE} gpu_util=${ROLLOUT_GPU_MEMORY_UTILIZATION} max_num_seqs=${ROLLOUT_MAX_NUM_SEQS} max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS} max_model_len=${ROLLOUT_MAX_MODEL_LEN}"
   (
     cd "${CODE_DIR}"
     exec env \
@@ -139,6 +146,7 @@ for idx in "${!MODEL_LABELS[@]}"; do
       VLLM_WORKER_MULTIPROC_METHOD=spawn \
       VLLM_ATTENTION_BACKEND=XFORMERS \
       HYDRA_FULL_ERROR=1 \
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
       python -m verl.agent_trainer.main_generation \
         data.path="${ROOT}/AgentEval/sciworld" \
         data.max_prompt_length=1024 \
@@ -150,10 +158,12 @@ for idx in "${!MODEL_LABELS[@]}"; do
         agentgym.max_rounds=30 \
         agentgym.timeout=500 \
         model.path="${model_path}" \
-        rollout.gpu_memory_utilization=0.95 \
+        rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
         rollout.temperature=1 \
-        rollout.max_model_len=32768 \
+        rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}" \
         rollout.max_tokens=200 \
+        rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}" \
+        rollout.max_num_batched_tokens="${ROLLOUT_MAX_NUM_BATCHED_TOKENS}" \
         rollout.tensor_model_parallel_size=1 \
         rollout.rollout_log_dir="${log_dir}/executer_logs" \
         trainer.nnodes=1 \
@@ -190,9 +200,49 @@ print(
 )
 PY
 )"
-  metrics_json="$(cat "${metrics_json_path}")"
-  printf '{"timestamp":"%s","task":"sciworld","split":"test","model_label":"%s","model_path":"%s","score":%s,"succ":%s,"pass":%s,"metrics":%s,"log_path":"%s"}\n' \
-    "${ts}" "${model_label}" "${model_path}" "${overall_score}" "${overall_succ}" "${overall_pass}" "${metrics_json}" "${log_path}" >> "${RESULTS_FILE}"
+  python - "${metrics_json_path}" "${RESULTS_FILE}" "${ts}" "${model_label}" "${model_path}" "${log_path}" <<'PY'
+import json
+import sys
+
+metrics_path, results_path, ts, model_label, model_path, log_path = sys.argv[1:7]
+metrics = json.load(open(metrics_path, "r", encoding="utf-8"))
+per_topic = metrics.get("per_topic", {})
+topic_scores = {
+    topic: float(values.get("score", 0.0))
+    for topic, values in per_topic.items()
+}
+row = {
+    "timestamp": ts,
+    "task": "sciworld",
+    "split": "test",
+    "model_label": model_label,
+    "model_path": model_path,
+    "score": float(metrics.get("overall", {}).get("score", 0.0)),
+    "succ": float(metrics.get("overall", {}).get("succ", 0.0)),
+    "pass": float(metrics.get("overall", {}).get("pass", 0.0)),
+    "topic_scores": topic_scores,
+    "topic_metrics": per_topic,
+    "metrics": metrics,
+    "log_path": log_path,
+}
+with open(results_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(row, ensure_ascii=True) + "\n")
+PY
+
+  python - "${metrics_json_path}" <<'PY'
+import json
+import sys
+
+metrics = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+for topic, vals in metrics.get("per_topic", {}).items():
+    print(
+        f"TOPIC {topic}: "
+        f"Score={float(vals.get('score', 0.0)):.3f} "
+        f"Succ={float(vals.get('succ', 0.0)):.3f} "
+        f"Pass={float(vals.get('pass', 0.0)):.3f} "
+        f"Count={int(vals.get('count', 0))}"
+    )
+PY
 
   echo "===== EVAL DONE model=${model_label} score=${overall_score} succ=${overall_succ} pass=${overall_pass} ====="
 done

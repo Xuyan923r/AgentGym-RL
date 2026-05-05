@@ -1,0 +1,96 @@
+{
+  "notes": [
+    "Recovered from existing result files in the repository.",
+    "For the 3B base model, the top-level `succ` field in FinalResults_Sciworld.jsonl is inconsistent with `metrics.overall.succ`; the per-topic values below are copied from `metrics.per_topic`, and the overall values below come from `metrics.overall`."
+  ],
+  "models": [
+    {
+      "model_label": "base_model_3b",
+      "model_path": "/idfsdata/yexuyan/AgentGym-RL/models/Qwen2.5-3B-Instruct",
+      "source_file": "/idfsdata/yexuyan/AgentGym-RL/FinalResults_Sciworld.jsonl",
+      "timestamp": "2026-04-15T06:49:55Z",
+      "overall": {
+        "count": 200,
+        "score": -18.674999237060547,
+        "pass": 0.17,
+        "succ": 0.025
+      },
+      "per_topic": {
+        "Biology": {
+          "count": 15,
+          "score": -8.333333015441895,
+          "pass": 0.2,
+          "succ": 0.26666666666666666
+        },
+        "Chemistry": {
+          "count": 5,
+          "score": -14.399999618530273,
+          "pass": 0.4,
+          "succ": 0.2
+        },
+        "Classification": {
+          "count": 44,
+          "score": -18.795454025268555,
+          "pass": 0.29545454545454547,
+          "succ": 0.3181818181818182
+        },
+        "Electricity": {
+          "count": 83,
+          "score": -10.301204681396484,
+          "pass": 0.13253012048192772,
+          "succ": 0.20481927710843373
+        },
+        "Measurement": {
+          "count": 53,
+          "score": -35.01886749267578,
+          "pass": 0.09433962264150944,
+          "succ": 0.3584905660377358
+        }
+      }
+    },
+    {
+      "model_label": "base_model_7b",
+      "model_path": "/idfsdata/yexuyan/AgentGym-RL/models/Qwen2.5-7B-Instruct",
+      "source_file": "/idfsdata/yexuyan/AgentGym-RL/FinalResults_Sciworld_7B.jsonl",
+      "timestamp": "2026-04-18T08:55:43Z",
+      "overall": {
+        "count": 200,
+        "score": -19.68000030517578,
+        "pass": 0.245,
+        "succ": 0.015
+      },
+      "per_topic": {
+        "Biology": {
+          "count": 15,
+          "score": -53.33333206176758,
+          "pass": 0.13333333333333333,
+          "succ": 0.13333333333333333
+        },
+        "Chemistry": {
+          "count": 5,
+          "score": -34.0,
+          "pass": 0.4,
+          "succ": 0.0
+        },
+        "Classification": {
+          "count": 44,
+          "score": -21.0,
+          "pass": 0.3181818181818182,
+          "succ": 0.0
+        },
+        "Electricity": {
+          "count": 83,
+          "score": -2.5903613567352295,
+          "pass": 0.2891566265060241,
+          "succ": 0.0
+        },
+        "Measurement": {
+          "count": 53,
+          "score": -34.47169876098633,
+          "pass": 0.1320754716981132,
+          "succ": 0.018867924528301886
+        }
+      }
+    }
+  ]
+}

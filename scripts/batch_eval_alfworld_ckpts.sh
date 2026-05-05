@@ -29,11 +29,14 @@ EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-64}"
 
 BASE_3B_MODEL_PATH="${BASE_3B_MODEL_PATH:-/idfsdata/yexuyan/AgentGym-RL/models/Qwen2.5-3B-Instruct}"
 BASE_7B_MODEL_PATH="${BASE_7B_MODEL_PATH:-/idfsdata/yexuyan/AgentGym-RL/models/Qwen2.5-7B-Instruct}"
+INCLUDE_BASE_3B="${INCLUDE_BASE_3B:-1}"
+INCLUDE_BASE_7B="${INCLUDE_BASE_7B:-1}"
 CKPT_ROOT_3B="${CKPT_ROOT_3B:-/idfsdata/yexuyan/AgentGym-RL/checkpoints/ALFWORLD_GRPO_3B_SCORE_20260417_143823}"
 CKPT_ROOT_7B="${CKPT_ROOT_7B:-/idfsdata/yexuyan/AgentGym-RL/checkpoints/ALFWORLD_GRPO_Qwen25_7B_SCORE_LEN6000_BS8_20260417_080919}"
 
 EVAL_DATA_DIR="${EVAL_DATA_DIR:-${ROOT}/AgentEval/alfworld}"
 EVAL_TEST_FILE="${EVAL_TEST_FILE:-${EVAL_DATA_DIR}/alfworld_test.json}"
+EVAL_TOPIC_MAPPING_FILE="${EVAL_TOPIC_MAPPING_FILE:-${EVAL_DATA_DIR}/alfworld_test_mappings.json}"
 
 # Keep runtime files out of /home and /tmp.
 TMPDIR="${TMPDIR:-/idfsdata/yexuyan/te}"
@@ -90,18 +93,22 @@ PY
 
 # Build official ALFWorld test split file for verl.main_generation:
 # expects JSON list with prompt_key=item_id.
-python3 - "${EVAL_TEST_FILE}" "${ROOT}/AgentGym/agentenv-alfworld/configs/mappings_test.json" <<'PY'
+python3 - "${EVAL_TEST_FILE}" "${EVAL_TOPIC_MAPPING_FILE}" "${ROOT}/AgentGym/agentenv-alfworld/configs/mappings_test.json" <<'PY'
 import json
 import sys
 
 out_path = sys.argv[1]
-mapping_path = sys.argv[2]
+mapping_copy_path = sys.argv[2]
+mapping_path = sys.argv[3]
 with open(mapping_path, "r", encoding="utf-8") as f:
     mappings = json.load(f)
 rows = [{"item_id": f"alfworld_{int(m['item_id'])}"} for m in mappings]
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(rows, f, ensure_ascii=True)
+with open(mapping_copy_path, "w", encoding="utf-8") as f:
+    json.dump(mappings, f, ensure_ascii=True)
 print(f"Wrote {len(rows)} test ids to {out_path}")
+print(f"Copied mapping metadata to {mapping_copy_path}")
 PY
 
 source "${CONDA_SH}"
@@ -122,10 +129,14 @@ fi
 MODEL_LABELS=()
 MODEL_PATHS=()
 
-MODEL_LABELS+=("base_3b")
-MODEL_PATHS+=("${BASE_3B_MODEL_PATH}")
-MODEL_LABELS+=("base_7b")
-MODEL_PATHS+=("${BASE_7B_MODEL_PATH}")
+if [[ "${INCLUDE_BASE_3B}" == "1" ]]; then
+  MODEL_LABELS+=("base_3b")
+  MODEL_PATHS+=("${BASE_3B_MODEL_PATH}")
+fi
+if [[ "${INCLUDE_BASE_7B}" == "1" ]]; then
+  MODEL_LABELS+=("base_7b")
+  MODEL_PATHS+=("${BASE_7B_MODEL_PATH}")
+fi
 
 mapfile -t CKPTS_3B < <(find "${CKPT_ROOT_3B}" -maxdepth 1 -type d -name 'global_step_*' | sort -V)
 mapfile -t CKPTS_7B < <(find "${CKPT_ROOT_7B}" -maxdepth 1 -type d -name 'global_step_*' | sort -V)
@@ -217,6 +228,7 @@ run_one_model() {
       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
       python -m verl.agent_trainer.main_generation \
         data.path="${EVAL_DATA_DIR}" \
+        data.topic_mapping_file="${EVAL_TOPIC_MAPPING_FILE}" \
         data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
         data.max_response_length="${MAX_RESPONSE_LENGTH}" \
         data.n_samples="${N_SAMPLES}" \
@@ -282,19 +294,65 @@ with open(out_path, "w", encoding="utf-8") as f:
     json.dump(metrics, f, ensure_ascii=True, sort_keys=True)
 PY
 
-  read -r score succ <<<"$(python3 - "${metrics_json_path}" <<'PY'
+  read -r score succ passed <<<"$(python3 - "${metrics_json_path}" <<'PY'
 import json
 import sys
 metrics = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 overall = metrics.get("overall", {})
-print(f"{float(overall.get('score', 0.0))} {float(overall.get('succ', 0.0))}")
+print(
+    f"{float(overall.get('score', 0.0))} "
+    f"{float(overall.get('succ', 0.0))} "
+    f"{float(overall.get('pass', 0.0))}"
+)
 PY
 )"
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf '{"timestamp":"%s","task":"alfworld","split":"test","model_label":"%s","model_path":"%s","score":%s,"succ":%s,"log_path":"%s"}\n' \
-    "${ts}" "${model_label}" "${model_path}" "${score}" "${succ}" "${log_path}" >> "${RESULTS_FILE}"
+  metrics_json="$(cat "${metrics_json_path}")"
+  python3 - "${metrics_json_path}" "${RESULTS_FILE}" "${ts}" "${model_label}" "${model_path}" "${log_path}" <<'PY'
+import json
+import sys
 
-  echo "===== EVAL DONE model=${model_label} score=${score} succ=${succ} =====" | tee -a "${log_path}"
+metrics_path, results_path, ts, model_label, model_path, log_path = sys.argv[1:7]
+metrics = json.load(open(metrics_path, "r", encoding="utf-8"))
+per_topic = metrics.get("per_topic", {})
+subtask_scores = {
+    topic: float(values.get("score", 0.0))
+    for topic, values in per_topic.items()
+}
+row = {
+    "timestamp": ts,
+    "task": "alfworld",
+    "split": "test",
+    "model_label": model_label,
+    "model_path": model_path,
+    "score": float(metrics.get("overall", {}).get("score", 0.0)),
+    "succ": float(metrics.get("overall", {}).get("succ", 0.0)),
+    "pass": float(metrics.get("overall", {}).get("pass", 0.0)),
+    "subtask_scores": subtask_scores,
+    "subtask_metrics": per_topic,
+    "metrics": metrics,
+    "log_path": log_path,
+}
+with open(results_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(row, ensure_ascii=True) + "\n")
+PY
+
+  python3 - "${metrics_json_path}" <<'PY'
+import json
+import sys
+
+metrics = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+for topic, vals in metrics.get("per_topic", {}).items():
+    print(
+        f"TOPIC {topic}: "
+        f"Score={float(vals.get('score', 0.0)):.3f} "
+        f"Succ={float(vals.get('succ', 0.0)):.3f} "
+        f"Pass={float(vals.get('pass', 0.0)):.3f} "
+        f"Count={int(vals.get('count', 0))}"
+    )
+PY
+
+  echo "===== EVAL DONE model=${model_label} score=${score} succ=${succ} pass=${passed} =====" | tee -a "${log_path}"
 done
 
 echo "All ALFWorld evaluations completed."
@@ -309,6 +367,7 @@ for row in rows:
     print(
         f"{row.get('model_label', 'unknown'):>20} | "
         f"Score={float(row.get('score', 0.0)):.4f} | "
-        f"Succ={float(row.get('succ', 0.0)):.4f}"
+        f"Succ={float(row.get('succ', 0.0)):.4f} | "
+        f"Pass={float(row.get('pass', 0.0)):.4f}"
     )
 PY

@@ -4,6 +4,7 @@ trainer:
 
 data:
   path: null
+  topic_mapping_file: null
   max_prompt_length: 1024
   max_response_length: 15360
   prompt_key: item_id

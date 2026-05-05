@@ -17,9 +17,11 @@ assets
 .tmux_tmp
 .tmp
 .runtime
+runtime
 .cache
 .alfworld_cache
 hf_home
 AgentEval
 assets
 triton_cache
+*pyc

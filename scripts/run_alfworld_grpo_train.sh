@@ -21,6 +21,7 @@ fi
 WANDB_MODE="${WANDB_MODE:-online}"
 WANDB_ENTITY="${WANDB_ENTITY:-xuyan923r-renmin-university-of-china}"
 WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.wandb.ai}"
+WANDB_API_KEY="${WANDB_API_KEY:-}"
 PROJECT_NAME="${PROJECT_NAME:-ALFWorld}"
 HOME="${HOME:-${ROOT}/runtime/alfworld_train_home}"
 
@@ -172,6 +173,7 @@ exec env \
   WANDB_MODE="${WANDB_MODE}" \
   WANDB_ENTITY="${WANDB_ENTITY}" \
   WANDB_BASE_URL="${WANDB_BASE_URL}" \
+  WANDB_API_KEY="${WANDB_API_KEY}" \
   python -m verl.agent_trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     algorithm.rounds_ctrl.type=fixed \

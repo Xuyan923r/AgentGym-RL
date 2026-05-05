@@ -6,13 +6,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRAIN_CODE_DIR="${ROOT}/AgentGym-RL"
 CONDA_SH="${CONDA_SH:-/home/yexuyan/miniconda3/etc/profile.d/conda.sh}"
 TRAIN_ENV="${TRAIN_ENV:-/idfsdata/yexuyan/conda_envs/agentgym-rl-webshop}"
-MODEL_PATH="${MODEL_PATH:-${ROOT}/models/Qwen2.5-3B-Instruct}"
+MODEL_PATH="${MODEL_PATH:-${ROOT}/models/Qwen2.5-7B-Instruct}"
 EMBEDDING_MODEL_PATH="${EMBEDDING_MODEL_PATH:-${ROOT}/models/Qwen3-Embedding-8B}"
 TRAIN_FILE="${TRAIN_FILE:-${ROOT}/AgentItemId/alfworld_rwml_train.jsonl}"
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 IFS=',' read -r -a GPU_ARRAY <<< "${CUDA_VISIBLE_DEVICES}"
-NUM_GPUS="${#GPU_ARRAY[@]}"
+VISIBLE_GPUS="${#GPU_ARRAY[@]}"
+NUM_GPUS="${NUM_GPUS:-4}"
+if (( VISIBLE_GPUS < NUM_GPUS )); then
+  echo "Visible GPUs (${VISIBLE_GPUS}) is smaller than requested NUM_GPUS (${NUM_GPUS})."
+  exit 1
+fi
 if (( NUM_GPUS < 1 )); then
   echo "CUDA_VISIBLE_DEVICES is empty."
   exit 1
@@ -39,14 +44,14 @@ ROLLOUT_N="${ROLLOUT_N:-8}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-16}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
-PPO_EPOCHS="${PPO_EPOCHS:-2}"
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-2}"
+PPO_EPOCHS="${PPO_EPOCHS:-1}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-512}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.70}"
-SAVE_FREQ="${SAVE_FREQ:-50}"
+SAVE_FREQ="${SAVE_FREQ:-100}"
 REMOVE_PREVIOUS_CKPT_IN_SAVE="${REMOVE_PREVIOUS_CKPT_IN_SAVE:-0}"
 MAX_LOCAL_CKPT_TO_KEEP="${MAX_LOCAL_CKPT_TO_KEEP:-6}"
 RESUME_MODE="${RESUME_MODE:-auto}"
@@ -142,22 +147,24 @@ exec env \
     actor_rollout_ref.actor.optim.lr="${POLICY_LR}" \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
-    actor_rollout_ref.rollout.name=alfworld_rwml_hf \
+    actor_rollout_ref.rollout.name=alfworld_rwml_vllm \
     actor_rollout_ref.rollout.temperature="${RWML_TEMPERATURE}" \
     actor_rollout_ref.rollout.top_p=1.0 \
-    actor_rollout_ref.rollout.top_k=0 \
+    actor_rollout_ref.rollout.top_k=-1 \
     actor_rollout_ref.rollout.do_sample=True \
     actor_rollout_ref.rollout.n="${ROLLOUT_N}" \
     actor_rollout_ref.rollout.response_length="${RWML_RESPONSE_LENGTH}" \
+    actor_rollout_ref.rollout.max_tokens="${RWML_RESPONSE_LENGTH}" \
     actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
     actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.rollout.rwml_reward.embedding_model_path="${EMBEDDING_MODEL_PATH}" \
-    actor_rollout_ref.rollout.rwml_reward.threshold="${RWML_THRESHOLD}" \
-    actor_rollout_ref.rollout.rwml_reward.round_step="${RWML_ROUND_STEP}" \
-    actor_rollout_ref.rollout.rwml_reward.max_length="${RWML_EMBED_MAX_LENGTH}" \
+    +actor_rollout_ref.rollout.rwml_reward.embedding_model_path="${EMBEDDING_MODEL_PATH}" \
+    +actor_rollout_ref.rollout.rwml_reward.device="cuda:4" \
+    +actor_rollout_ref.rollout.rwml_reward.threshold="${RWML_THRESHOLD}" \
+    +actor_rollout_ref.rollout.rwml_reward.round_step="${RWML_ROUND_STEP}" \
+    +actor_rollout_ref.rollout.rwml_reward.max_length="${RWML_EMBED_MAX_LENGTH}" \
     algorithm.kl_ctrl.kl_coef="${KL_COEF}" \
     trainer.project_name="${PROJECT_NAME}" \
     trainer.experiment_name="${EXP_NAME}" \

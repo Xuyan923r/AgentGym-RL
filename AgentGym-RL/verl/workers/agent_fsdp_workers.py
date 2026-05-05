@@ -281,10 +281,11 @@ class ActorRolloutRefWorker(Worker):
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config
 
     def _build_rollout(self):
-        if self.config.rollout.name == 'alfworld_rwml_hf':
+        if self.config.rollout.name in {'alfworld_rwml_hf', 'alfworld_rwml_vllm'}:
             from omegaconf import OmegaConf
-            from verl.workers.rollout.alfworld_rwml import ALFWorldRWMLHFRollout
+            from verl.workers.rollout.alfworld_rwml import ALFWorldRWMLHFRollout, ALFWorldRWMLvLLMRollout
             from verl.workers.sharding_manager.base import BaseShardingManager
+            from verl.workers.sharding_manager import FSDPVLLMShardingManager
             from verl.utils.rwml.alfworld_reward import (
                 ALFWorldRWMLRewardConfig,
                 ALFWorldRWMLRewardScorer,
@@ -294,13 +295,42 @@ class ActorRolloutRefWorker(Worker):
             reward_device = rwml_reward_cfg.pop("device", "cuda")
             reward_config = ALFWorldRWMLRewardConfig(**rwml_reward_cfg)
             reward_scorer = ALFWorldRWMLRewardScorer(config=reward_config, device=reward_device)
-            rollout = ALFWorldRWMLHFRollout(
-                module=self.actor_module_fsdp,
-                config=self.config.rollout,
+            if self.config.rollout.name == 'alfworld_rwml_hf':
+                rollout = ALFWorldRWMLHFRollout(
+                    module=self.actor_module_fsdp,
+                    config=self.config.rollout,
+                    tokenizer=self.tokenizer,
+                    reward_scorer=reward_scorer,
+                )
+                return rollout, BaseShardingManager()
+
+            from torch.distributed.device_mesh import init_device_mesh
+            infer_tp = self.config.rollout.tensor_model_parallel_size
+            dp = self.world_size // infer_tp
+            assert self.world_size % infer_tp == 0, f'rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}'
+            rollout_device_mesh = init_device_mesh('cuda', mesh_shape=(dp, infer_tp), mesh_dim_names=['dp', 'infer_tp'])
+
+            log_gpu_memory_usage('Before building RWML vllm rollout', logger=None)
+            rollout = ALFWorldRWMLvLLMRollout(
+                actor_module=self.actor_module_fsdp,
+                rollout_config=self.config.rollout,
+                agentgym_config=self.config.agentgym,
                 tokenizer=self.tokenizer,
+                model_hf_config=self.actor_model_config,
                 reward_scorer=reward_scorer,
             )
-            return rollout, BaseShardingManager()
+            log_gpu_memory_usage('After building RWML vllm rollout', logger=None)
+            if torch.distributed.get_world_size() == 1:
+                self.config.rollout.load_format = 'dummy_hf'
+            rollout_sharding_manager = FSDPVLLMShardingManager(
+                module=self.actor_module_fsdp,
+                inference_engine=rollout.inference_engine,
+                model_config=self.actor_model_config,
+                full_params='hf' in self.config.rollout.load_format,
+                device_mesh=rollout_device_mesh,
+            )
+            log_gpu_memory_usage('After building RWML vllm sharding manager', logger=None)
+            return rollout, rollout_sharding_manager
 
         from torch.distributed.device_mesh import init_device_mesh
         # TODO(sgm): support FSDP hybrid shard for larger model

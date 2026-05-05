@@ -30,8 +30,15 @@ class ALFWorldRWMLHFRollout(BaseRollout):
 
         eos_token_id = prompts.meta_info["eos_token_id"]
         pad_token_id = prompts.meta_info["pad_token_id"]
+        rollout_n = int(getattr(self.config, "n", 1) or 1)
         batch_size = idx.size(0)
         prompt_length = idx.size(1)
+
+        if rollout_n > 1:
+            idx = idx.repeat_interleave(rollout_n, dim=0)
+            attention_mask = attention_mask.repeat_interleave(rollout_n, dim=0)
+            position_ids = position_ids.repeat_interleave(rollout_n, dim=0)
+        expanded_batch_size = idx.size(0)
 
         do_sample = prompts.meta_info.get("do_sample", self.config.do_sample)
         response_length = prompts.meta_info.get("response_length", self.config.response_length)
@@ -74,7 +81,7 @@ class ALFWorldRWMLHFRollout(BaseRollout):
         target_length = prompt_length + response_length
         if seq.shape[1] < target_length:
             pad = torch.full(
-                size=(batch_size, target_length - seq.shape[1]),
+                size=(expanded_batch_size, target_length - seq.shape[1]),
                 fill_value=pad_token_id,
                 dtype=seq.dtype,
                 device=seq.device,
@@ -85,7 +92,7 @@ class ALFWorldRWMLHFRollout(BaseRollout):
         response = seq[:, prompt_length:]
 
         delta_position_id = torch.arange(1, response.size(1) + 1, device=position_ids.device)
-        delta_position_id = delta_position_id.unsqueeze(0).repeat(batch_size, 1)
+        delta_position_id = delta_position_id.unsqueeze(0).repeat(expanded_batch_size, 1)
         response_position_ids = position_ids[:, -1:] + delta_position_id
         full_position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
 
@@ -99,11 +106,15 @@ class ALFWorldRWMLHFRollout(BaseRollout):
         valid_lengths = response_attention_mask.sum(dim=-1)
         decoded_responses: List[str] = []
         references: List[str] = []
-        for i in range(batch_size):
+        repeated_targets: List[str] = []
+        for target in prompts.non_tensor_batch["rwml_target_next_observation"]:
+            repeated_targets.extend([target] * rollout_n)
+
+        for i in range(expanded_batch_size):
             valid_len = int(valid_lengths[i].item())
             valid_ids = response[i, :valid_len]
             decoded_responses.append(self.tokenizer.decode(valid_ids, skip_special_tokens=True))
-            references.append(prompts.non_tensor_batch["rwml_target_next_observation"][i])
+            references.append(repeated_targets[i])
         scores = self.reward_scorer.score_texts(decoded_responses, references)
 
         for i, score in enumerate(scores):
@@ -124,10 +135,10 @@ class ALFWorldRWMLHFRollout(BaseRollout):
                 "scores": reward_tensor,
                 "task_scores": reward_tensor,
                 "task_raw_scores": raw_reward_tensor,
-                "task_rounds": torch.ones(batch_size, dtype=torch.float32, device=seq.device),
-                "task_dones": torch.ones(batch_size, dtype=torch.float32, device=seq.device),
+                "task_rounds": torch.ones(expanded_batch_size, dtype=torch.float32, device=seq.device),
+                "task_dones": torch.ones(expanded_batch_size, dtype=torch.float32, device=seq.device),
             },
-            batch_size=batch_size,
+            batch_size=expanded_batch_size,
         )
 
         non_tensors = {
